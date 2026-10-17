@@ -1,0 +1,44 @@
+# Skien Mails — single container: SMTP + delivery queue + webmail + admin + SQLite.
+#
+#   docker compose up -d --build
+#   docker logs skienmail 2>&1 | grep "setup code"     # code for the first-run wizard
+#
+# The web app listens on port 8080 (plain HTTP). Put Nginx Proxy Manager (or any
+# reverse proxy with HTTPS) in front of it for https://mail.skienlab.com.
+services:
+  skienmail:
+    build: .
+    image: skienmail:latest
+    container_name: skienmail
+    restart: unless-stopped
+    ports:
+      - "25:25"     # inbound mail from the internet (MX)
+      - "587:587"   # submission (STARTTLS) for apps/printers that send mail
+      - "465:465"   # submission (implicit TLS)
+      - "8080:8080" # web app — keep this behind your HTTPS reverse proxy
+    environment:
+      TZ: Asia/Kolkata
+      # Public name of the mail server (EHLO / TLS). Optional: you can also set it in the setup wizard.
+      # SM_HOSTNAME: mail.skienlab.com
+      #
+      # TLS for SMTP: point at the certificate your reverse proxy already has for the mail hostname.
+      # With Nginx Proxy Manager, mount its whole letsencrypt folder (the live/ files are symlinks):
+      # SM_TLS_CERT: /certs/live/npm-1/fullchain.pem
+      # SM_TLS_KEY: /certs/live/npm-1/privkey.pem
+    volumes:
+      - skienmail-data:/data
+      # - /opt/nginx-proxy-manager/letsencrypt:/certs:ro
+    # If Nginx Proxy Manager runs in Docker on the same host, join its network and
+    # forward mail.skienlab.com -> http://skienmail:8080 (then you can drop the 8080 port above):
+    # networks: [npm]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  skienmail-data:
+
+# networks:
+#   npm:
+#     external: true
+#     name: nginx-proxy-manager_default

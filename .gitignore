@@ -1,0 +1,6 @@
+/data/
+/skienmail
+*.db
+*.db-wal
+*.db-shm
+.env
