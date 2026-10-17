@@ -16,7 +16,7 @@ function showError(root, msg) {
 function busy(btn, on) { btn.classList.toggle('busy', on); }
 
 // ---------------------------------------------------------------- sign in
-export async function renderLogin(root, done) {
+export async function renderLogin(root, done, notice = '') {
   let org = '';
   try { org = (await api('/setup', { background: true })).org; } catch { /* ignore */ }
   document.title = 'Sign in – Skien Mails';
@@ -32,6 +32,7 @@ export async function renderLogin(root, done) {
         ${field({ label: 'Password', name: 'password', type: 'password', attrs: 'autocomplete="current-password"', required: true,
           suffix: html`<button type="button" class="icon-btn" data-pw-toggle="f-password" data-tip="Show password" aria-label="Show password">${icon('visibility')}</button>` })}
         <label class="check"><input type="checkbox" class="cb" name="remember" checked> Stay signed in on this device</label>
+        ${notice ? html`<div class="banner info" role="status" style="margin-top:8px">${icon('info', 's')}<span class="grow">${notice}</span></div>` : ''}
         <div class="form-err" role="alert"></div>
         <div class="auth-actions">
           <button type="button" class="btn left" id="forgot">Forgot password?</button>
@@ -134,9 +135,9 @@ export function renderSetup(root, done) {
           <p class="lead">Let's set up email for your organisation. It takes about a minute.</p>
           <div class="steps">${steps.map((_, i) => html`<i class="${i <= step ? 'on' : ''}"></i>`)}</div>
           <ul class="checklist">
-            <li>${icon('check_circle', 's')} Mailboxes like <b>name@${data.domain || 'yourdomain.com'}</b> for every employee</li>
-            <li>${icon('check_circle', 's')} Signed (DKIM) and verified (SPF, DMARC) mail out of the box</li>
-            <li>${icon('check_circle', 's')} Works in the browser and installs as an app on Windows, Mac and phones</li>
+            <li>${icon('check_circle', 's')}<span>Mailboxes like <b>name@${data.domain || 'yourdomain.com'}</b> for every employee</span></li>
+            <li>${icon('check_circle', 's')}<span>Signed (DKIM) and verified (SPF, DMARC) mail out of the box</span></li>
+            <li>${icon('check_circle', 's')}<span>Works in the browser and installs as an app on Windows, Mac and phones</span></li>
           </ul>
         </div>
         <form id="setup" novalidate>

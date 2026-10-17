@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"golang.org/x/net/idna"
 	"net"
 	"net/smtp"
 	"net/textproto"
@@ -190,6 +191,9 @@ func allErr(rcpts []string, err error) map[string]error {
 
 // sendDirect delivers to the recipient domain's MX hosts.
 func (a *App) sendDirect(ctx context.Context, domain, from string, rcpts []string, raw []byte) map[string]error {
+	if ascii, err := idna.Lookup.ToASCII(domain); err == nil {
+		domain = ascii // the resolver only takes ASCII names
+	}
 	lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	mxs, err := net.DefaultResolver.LookupMX(lctx, domain)
 	cancel()

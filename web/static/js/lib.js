@@ -170,7 +170,7 @@ export function greeting() {
 export const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + 's'}`;
 
 // ---------------------------------------------------------------- avatars
-const AV_COLORS = ['#1a73e8', '#d93025', '#188038', '#e37400', '#9334e6', '#c5221f', '#129eaf', '#b06000', '#3367d6', '#0b8043', '#a142f4', '#d01884', '#5f6368', '#1967d2'];
+const AV_COLORS = ['#1a73e8', '#d93025', '#188038', '#b45309', '#9334e6', '#c5221f', '#00796b', '#b06000', '#3367d6', '#0b8043', '#8430ce', '#d01884', '#5f6368', '#1967d2'];
 function hash(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0; return Math.abs(h); }
 export const people = new Map(); // email -> {id, name, avatar_ver}
 
@@ -194,7 +194,9 @@ export function snack(message, { action, onAction, timeout = 5000 } = {}) {
   const me = snackEl;
   me.querySelector('.icon-btn').onclick = () => dismissSnack(me);
   if (action) me.querySelector('.btn').onclick = () => { dismissSnack(me); onAction?.(); };
-  document.body.append(me);
+  // A modal dialog sits in the top layer above everything else; show the message inside it so it isn't hidden.
+  const dlgs = document.querySelectorAll('dialog[open]');
+  (dlgs[dlgs.length - 1] || document.body).append(me);
   if (timeout) snackTimer = setTimeout(() => dismissSnack(me), timeout);
   return () => dismissSnack(me);
 }
@@ -224,6 +226,8 @@ export function dialog({ title, text, body = '', iconName, actions, wide, onOpen
     const close = (v) => {
       if (done) return;
       done = true;
+      const sb = d.querySelector('.snackbar');
+      if (sb) document.body.append(sb); // keep a "Saved" message visible after the dialog goes
       d.close();
       d.remove();
       resolve(v);
@@ -233,7 +237,14 @@ export function dialog({ title, text, body = '', iconName, actions, wide, onOpen
       if (onAction) {
         btn?.classList.add('busy');
         let ok;
-        try { ok = await onAction(a.value, d); } catch (e) { toastError(e); ok = false; }
+        d.querySelector('.dlg-err')?.remove();
+        try { ok = await onAction(a.value, d); } catch (e) {
+          ok = false;
+          // Errors show inside the dialog, next to what the user is looking at.
+          const err = el(html`<p class="form-err dlg-err" role="alert">${icon('error', 's')}<span>${e?.message || String(e)}</span></p>`);
+          d.querySelector('.dlg-body').append(err);
+          err.scrollIntoView({ block: 'nearest' });
+        }
         btn?.classList.remove('busy');
         if (ok === false) return;
       }
@@ -269,9 +280,13 @@ export function confirmDialog(title, text, okLabel = 'OK', danger = false) {
 
 // ---------------------------------------------------------------- menus
 let openMenu = null;
-export function closeMenu() {
+let menuAnchor = null;
+export function closeMenu(restoreFocus = false) {
+  const hadFocus = openMenu?.contains(document.activeElement);
   openMenu?.remove();
   openMenu = null;
+  if (restoreFocus && hadFocus && menuAnchor?.isConnected) menuAnchor.focus({ preventScroll: true });
+  menuAnchor = null;
 }
 /** items: [{icon, label, onClick, danger}] | 'sep' | {html: Raw} */
 export function menu(anchor, items, { align = 'right', className = '' } = {}) {
@@ -295,6 +310,7 @@ export function menu(anchor, items, { align = 'right', className = '' } = {}) {
   m.style.left = left + 'px';
   m.style.top = top + 'px';
   openMenu = m;
+  menuAnchor = anchor;
   setTimeout(() => m.querySelector('button')?.focus({ preventScroll: true }), 0);
   m.addEventListener('keydown', (e) => {
     const btns = [...m.querySelectorAll('button')];
@@ -305,13 +321,15 @@ export function menu(anchor, items, { align = 'right', className = '' } = {}) {
   return m;
 }
 document.addEventListener('mousedown', (e) => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); });
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openMenu) { closeMenu(); e.stopPropagation(); } }, true);
-addEventListener('resize', closeMenu);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && openMenu) { closeMenu(true); e.stopPropagation(); } }, true);
+addEventListener('resize', () => closeMenu());
 
 // ---------------------------------------------------------------- tooltips
 let tip = null;
 let tipTimer = null;
+const noHover = matchMedia('(hover: none)');
 document.addEventListener('mouseover', (e) => {
+  if (noHover.matches) return; // touch screens: a tap shouldn't leave a tooltip behind
   const t = e.target.closest?.('[data-tip]');
   clearTimeout(tipTimer);
   if (!t) { tip?.classList.remove('show'); return; }
@@ -328,11 +346,21 @@ document.addEventListener('mouseover', (e) => {
 document.addEventListener('mousedown', () => { clearTimeout(tipTimer); tip?.classList.remove('show'); });
 
 // ---------------------------------------------------------------- misc
-export function debounce(fn, ms) {
+// debounce(fn, ms, maxWait): trailing debounce; with maxWait, a continuous stream of calls
+// still runs fn at least every maxWait ms instead of postponing it forever.
+export function debounce(fn, ms, maxWait = 0) {
   let t;
-  const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
-  d.flush = (...a) => { clearTimeout(t); return fn(...a); };
-  d.cancel = () => clearTimeout(t);
+  let first = 0;
+  const run = (...a) => { clearTimeout(t); first = 0; return fn(...a); };
+  const d = (...a) => {
+    clearTimeout(t);
+    const now = Date.now();
+    if (!first) first = now;
+    const wait = maxWait ? Math.max(0, Math.min(ms, first + maxWait - now)) : ms;
+    t = setTimeout(() => run(...a), wait);
+  };
+  d.flush = run;
+  d.cancel = () => { clearTimeout(t); first = 0; };
   return d;
 }
 

@@ -1,7 +1,7 @@
 // Compose window: recipients with autocomplete, rich text, attachments, autosaved drafts and undo-send.
 import { html, raw, icon, el, setHTML, api, upload, snack, dialog, avatar, bytes, fullDate, debounce, toastError, isEmail,
   confirmDialog, esc, fileIcon, people } from './lib.js';
-import { S, navigate, refreshCounts } from './state.js';
+import { S, navigate, refreshCounts, pref } from './state.js';
 
 let win = null; // the open compose window (one at a time)
 
@@ -152,14 +152,30 @@ function initialState(o) {
 }
 
 // ---------------------------------------------------------------- public API
+// A message that couldn't be saved to the server (offline, signed out) is kept in this
+// browser and offered back the next time Compose is opened.
+// Kept per user, so someone else signing in on the same browser never sees it.
+const backupKey = () => `unsaved-message:${S.me?.user?.id || 0}`;
+const backupMessage = (p) => { if (p && S.me) pref.set(backupKey(), { ...p, saved_at: Date.now() }); };
+const clearBackup = () => pref.set(backupKey(), null);
+pref.set('unsaved-message', null); // pre-release key that wasn't tied to a user
+
 export async function open(o = {}) {
+  const plain = !o.mode && !o.draftId && !o.to?.length && !o.subject;
   if (win) {
-    const empty = !o.mode && !o.draftId && !o.to?.length && !o.subject;
-    if (empty) { win.restore(); return; }
-    await win.close({ quiet: false });
+    if (plain) { win.restore(); return; }
+    if (!(await win.close({ quiet: false }))) return; // couldn't save: keep the current message open
   }
   let st;
-  if (o.draftId) {
+  let backup = plain ? pref.get(backupKey(), null) : null;
+  const mine = new Set(S.me.send_as.map((s) => s.email.toLowerCase()));
+  if (backup && backup.from && !mine.has(String(backup.from).toLowerCase())) backup = null; // not an address of this user
+  if (backup && Date.now() - (backup.saved_at || 0) < 14 * 864e5) {
+    st = { to: backup.to || [], cc: backup.cc || [], bcc: backup.bcc || [], subject: backup.subject || '', html: backup.html || '',
+      from: backup.from || S.me.user.email, files: (backup.attachments || []).map((f) => ({ ...f, done: true })),
+      replyToId: backup.reply_to_id || 0, draftId: backup.id || 0, title: backup.subject || 'Restored message', allowRemote: false, fromBackup: true };
+    snack('Restored a message that hadn\u2019t been saved');
+  } else if (o.draftId) {
     try {
       const d = await api(`/drafts/${o.draftId}`);
       st = { to: d.to || [], cc: d.cc || [], bcc: d.bcc || [], subject: d.subject || '', html: d.html || '', from: d.from || S.me.user.email,
@@ -173,17 +189,19 @@ export async function open(o = {}) {
   if (st.forwardOf) win.attachForwarded(st.forwardOf);
 }
 
-export async function closeAll(discardSilently) {
-  if (!win) return;
-  if (discardSilently) { win.destroy(); return; }
-  await win.close({ quiet: true });
+/** Closes the compose window. With keepLocal (session ended) the message is kept in this
+ *  browser instead of being saved to the server. Returns false if it couldn't be saved. */
+export async function closeAll(keepLocal) {
+  if (!win) return true;
+  if (keepLocal) { win.keepLocally(); return true; }
+  return win.close({ quiet: true });
 }
 
 // ---------------------------------------------------------------- window
 function createWindow(st) {
   const sendAs = S.me.send_as;
   const node = el(html`<section class="compose" role="dialog" aria-label="Compose">
-    <div class="c-head" data-head><b>${st.title}</b>
+    <div class="c-head" data-head><b dir="auto">${st.title}</b>
       <button class="icon-btn" data-min data-tip="Minimise" aria-label="Minimise">${icon('remove')}</button>
       <button class="icon-btn desktop-only" data-full data-tip="Full screen" aria-label="Full screen">${icon('open_in_full')}</button>
       <button class="icon-btn" data-close data-tip="Save & close" aria-label="Save and close">${icon('close')}</button>
@@ -194,8 +212,8 @@ function createWindow(st) {
         <div class="toggles"><button type="button" data-show="cc">Cc</button><button type="button" data-show="bcc">Bcc</button></div></div>
       <div class="c-line" data-line="cc" hidden><label>Cc</label><div class="rcpts" data-rc="cc"></div></div>
       <div class="c-line" data-line="bcc" hidden><label>Bcc</label><div class="rcpts" data-rc="bcc"></div></div>
-      <div class="c-line"><input class="subject" placeholder="Subject" aria-label="Subject" maxlength="400"></div>
-      <div class="editor-wrap" data-editor-wrap><div class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message body" data-ph="Write your message…" spellcheck="true"></div></div>
+      <div class="c-line"><input class="subject" placeholder="Subject" aria-label="Subject" maxlength="400" dir="auto"></div>
+      <div class="editor-wrap" data-editor-wrap><div class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message body" dir="auto" data-ph="Write your message…" spellcheck="true"></div></div>
       <div class="c-files" data-files></div>
       <div class="fmt-bar" data-fmt hidden>
         ${[['bold', 'format_bold', 'Bold (Ctrl+B)'], ['italic', 'format_italic', 'Italic (Ctrl+I)'], ['underline', 'format_underlined', 'Underline (Ctrl+U)'], ['strikeThrough', 'format_strikethrough', 'Strikethrough']].map(([c, i, t]) => html`<button class="icon-btn" data-cmd="${c}" data-tip="${t}" aria-label="${t}">${icon(i)}</button>`)}
@@ -338,17 +356,21 @@ function createWindow(st) {
     const sigOnly = editor.innerText.trim() === (editor.querySelector('.sig')?.innerText.trim() || '');
     return !p.to.length && !p.cc.length && !p.bcc.length && !p.subject.trim() && (!text || sigOnly) && !p.attachments.length && !st.replyToId;
   };
+  /** Saves the draft; resolves to false when the server couldn't be reached. */
   const saveDraft = async () => {
-    if (destroyed || !dirty || isEmpty()) return;
+    if (destroyed || !dirty || isEmpty()) return true;
     dirty = false;
     savedEl.textContent = 'Saving…';
     try {
       const res = await api('/drafts', { method: 'PUT', body: payload(), background: true });
       st.draftId = res.id;
       savedEl.textContent = 'Draft saved';
+      if (st.fromBackup) { clearBackup(); st.fromBackup = false; }
+      return true;
     } catch {
       dirty = true;
       savedEl.textContent = 'Not saved';
+      return false;
     }
   };
   const autosave = debounce(() => { saving = saveDraft(); }, 1500);
@@ -397,6 +419,7 @@ function createWindow(st) {
     } else {
       st.files.forEach((f) => f.id && api(`/uploads/${f.id}`, { method: 'DELETE', background: true }).catch(() => {}));
     }
+    if (st.fromBackup) clearBackup();
     snack('Draft discarded');
   }
 
@@ -418,6 +441,14 @@ function createWindow(st) {
     await saving?.catch(() => {});
     node.hidden = true;
     scrim?.remove();
+    if (win === api_) win = null; // while it's sending, Compose opens a new message
+    const reattach = async () => {
+      if (win && win !== api_ && !(await win.close({ quiet: false }))) return false;
+      win = api_;
+      node.hidden = false;
+      node.classList.remove('min');
+      return true;
+    };
     let cancelled = false;
     const body = { ...p, draft_id: st.draftId || 0, upload_ids: p.attachments.map((f) => f.id) };
     const timer = setTimeout(async () => {
@@ -426,37 +457,58 @@ function createWindow(st) {
       try {
         await api('/send', { method: 'POST', body });
         dismiss();
+        if (st.fromBackup) clearBackup();
         destroy();
         snack('Message sent', { action: 'View message', onAction: () => navigate('#/sent') });
         refreshCounts();
       } catch (e) {
         dismiss();
-        node.hidden = false;
+        await reattach();
         snack(e.message || "Couldn't send. Your message is saved as a draft.", { timeout: 8000 });
       }
     }, 5000);
     snack('Sending in a moment…', {
       action: 'Undo', timeout: 5000,
-      onAction: () => { cancelled = true; clearTimeout(timer); node.hidden = false; node.classList.remove('min'); editor.focus(); snack('Sending cancelled'); },
+      onAction: async () => {
+        cancelled = true;
+        clearTimeout(timer);
+        if (await reattach()) { editor.focus(); snack('Sending cancelled'); }
+        else snack('Sending cancelled \u2014 your message is in Drafts');
+      },
     });
   }
 
   const api_ = {
     restore() { node.classList.remove('min'); node.hidden = false; editor.focus(); },
     destroy,
+    /** Saves and closes. Resolves to false (window stays open) if the draft couldn't be saved. */
     async close({ quiet }) {
       autosave.cancel();
       if (isEmpty()) {
         const id = st.draftId;
         destroy();
         if (id) api(`/drafts/${id}`, { method: 'DELETE', background: true }).then(refreshCounts).catch(() => {});
-        return;
+        return true;
       }
       dirty = true;
-      await saveDraft();
+      await saving?.catch(() => {});
+      if (!(await saveDraft())) {
+        if (quiet) { api_.keepLocally(); return true; }
+        node.hidden = false;
+        node.classList.remove('min');
+        snack("Couldn't save the draft \u2014 check your connection", { action: 'Retry', onAction: () => api_.close({ quiet: false }), timeout: 8000 });
+        return false;
+      }
       destroy();
       refreshCounts();
       if (!quiet) snack('Draft saved', { action: 'Open', onAction: () => st.draftId && open({ draftId: st.draftId }) });
+      return true;
+    },
+    /** Keeps the message in this browser (used when the session ends) and closes the window. */
+    keepLocally() {
+      autosave.cancel();
+      if (!isEmpty()) backupMessage(payload());
+      destroy();
     },
     async attachForwarded(m) {
       if (!m.attachments?.some((a) => !a.inline)) return;

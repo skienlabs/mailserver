@@ -200,6 +200,33 @@ ALTER TABLE messages ADD COLUMN trashed_at INTEGER NOT NULL DEFAULT 0;
 UPDATE messages SET trashed_at = received_at WHERE folder IN ('trash','spam');
 CREATE INDEX messages_trashed ON messages(trashed_at) WHERE trashed_at > 0;
 `,
+	// 3: performance — covering indexes for the conversation list, unread counts and threading.
+	`
+DROP INDEX messages_folder;
+CREATE INDEX messages_list   ON messages(user_id, folder, received_at, thread_id);
+CREATE INDEX messages_recent ON messages(user_id, received_at, folder, thread_id);
+CREATE INDEX messages_tcount ON messages(user_id, folder, thread_id);
+CREATE INDEX messages_unread ON messages(user_id, folder, thread_id) WHERE seen = 0;
+
+CREATE TABLE message_refs (
+  user_id INTEGER NOT NULL,
+  ref     TEXT NOT NULL,
+  msg_id  INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, ref, msg_id)
+) WITHOUT ROWID;
+CREATE INDEX message_refs_msg ON message_refs(msg_id);
+WITH RECURSIVE split(msg_id, user_id, rest, ref) AS (
+  SELECT id, user_id, refs || ' ', '' FROM messages WHERE refs <> ''
+  UNION ALL
+  SELECT msg_id, user_id, substr(rest, instr(rest, ' ') + 1), substr(rest, 1, instr(rest, ' ') - 1) FROM split WHERE rest <> ''
+)
+INSERT OR IGNORE INTO message_refs(user_id, ref, msg_id)
+  SELECT user_id, ref, msg_id FROM split WHERE ref <> ''
+  UNION SELECT user_id, in_reply_to, id FROM messages WHERE in_reply_to <> '';
+
+DROP INDEX mail_log_ts;
+CREATE INDEX mail_log_ts ON mail_log(ts, direction, status);
+`,
 }
 
 // OpenDB opens (and migrates) the SQLite database in dataDir.

@@ -47,7 +47,7 @@ function general(pane) {
           <div class="section" style="margin:20px 0 0">
             <h2 style="font-size:15px">Signature</h2>
             <p class="lead small">Added to new messages, replies and forwards.</p>
-            <div class="field" style="margin-top:0"><div id="sig" class="editor" contenteditable="true" data-ph="e.g. Asi K · Skienlab · +91 98765 43210"
+            <div class="field" style="margin-top:0"><div id="sig" class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Signature" dir="auto" data-ph="e.g. Asi K · Skienlab · +91 98765 43210"
               style="border:1px solid var(--outline);border-radius:6px;padding:12px 16px;min-height:96px">${raw(cleanForEditor(u.signature))}</div></div>
           </div>
           <div class="form-actions"><button class="btn filled" type="submit">Save profile</button></div>

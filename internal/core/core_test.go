@@ -12,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/smtp"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -128,6 +129,10 @@ func TestEndToEnd(t *testing.T) {
 	app, err := NewApp(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if os.Getenv("SM_TEST_ONECONN") == "1" {
+		// Any query run while another result set or transaction is open would hang here.
+		app.DB.SetMaxOpenConns(1)
 	}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)

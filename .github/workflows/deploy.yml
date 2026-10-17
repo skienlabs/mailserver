@@ -78,7 +78,7 @@ jobs:
           script: |
             set -e
             export PATH="$HOME/google-cloud-sdk/bin:$PATH"
-            cd ~/docker/apps/mailserver || { echo "Missing ~/docker/apps/mailserver/docker-compose.yml - copy deploy/docker-compose.yml from the repo first"; exit 1; }
+            cd ~/docker/apps/mailserver || { echo "Missing ~/docker/apps/mailserver/docker-compose.yml - copy docker-compose.yml from the repo first"; exit 1; }
             docker compose pull
             docker compose up -d
             status=starting

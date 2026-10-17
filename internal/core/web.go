@@ -117,6 +117,10 @@ func loadAssets() (*assetStore, error) {
 		}
 		st.files["/"+n] = a
 	}
+	// Browsers and tools still probe /favicon.ico; browsers accept a PNG there.
+	if f := st.files["/icons/favicon-32.png"]; f != nil {
+		st.files["/favicon.ico"] = f
+	}
 	return st, nil
 }
 
@@ -196,6 +200,11 @@ func (a *App) handler() (http.Handler, error) {
 					httpError(w, http.StatusForbidden, "Cross-origin request blocked")
 					return
 				}
+			}
+			if r.URL.Path != "/api/events" && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				gw := &gzipJSONWriter{ResponseWriter: w}
+				defer gw.Close()
+				w = gw
 			}
 			api.ServeHTTP(w, r)
 			return
@@ -362,4 +371,49 @@ func userFrom(r *http.Request) *User {
 func sessionFrom(r *http.Request) int64 {
 	id, _ := r.Context().Value(ctxSession).(int64)
 	return id
+}
+
+// gzipJSONWriter compresses JSON API responses (lists and conversations are 25–300 KB of
+// highly repetitive JSON). Binary responses (attachments, avatars, raw) pass through.
+type gzipJSONWriter struct {
+	http.ResponseWriter
+	gz      *gzip.Writer
+	decided bool
+}
+
+var gzPool = sync.Pool{New: func() any { w, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed); return w }}
+
+func (g *gzipJSONWriter) WriteHeader(code int) {
+	if !g.decided {
+		g.decided = true
+		h := g.Header()
+		if strings.HasPrefix(h.Get("Content-Type"), "application/json") && h.Get("Content-Encoding") == "" && code != http.StatusNoContent && code != http.StatusNotModified {
+			h.Set("Content-Encoding", "gzip")
+			h.Add("Vary", "Accept-Encoding")
+			h.Del("Content-Length")
+			g.gz = gzPool.Get().(*gzip.Writer)
+			g.gz.Reset(g.ResponseWriter)
+		}
+	}
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *gzipJSONWriter) Write(b []byte) (int, error) {
+	if !g.decided {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.gz != nil {
+		return g.gz.Write(b)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *gzipJSONWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
+func (g *gzipJSONWriter) Close() {
+	if g.gz != nil {
+		g.gz.Close()
+		gzPool.Put(g.gz)
+		g.gz = nil
+	}
 }

@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -44,28 +46,27 @@ func (a *App) handleAdminOverview(w http.ResponseWriter, r *http.Request, u *Use
 	var days []day
 	start := time.Now().AddDate(0, 0, -13)
 	start = time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.Local)
-	idx := map[string]*day{}
 	for i := 0; i < 14; i++ {
 		d := start.AddDate(0, 0, i).Format("2006-01-02")
 		days = append(days, day{Day: d})
 	}
+	// Count per day in SQL (one indexed range per local day) instead of streaming every row to Go.
+	var vals []string
+	var dargs []any
 	for i := range days {
-		idx[days[i].Day] = &days[i]
+		lo := start.AddDate(0, 0, i)
+		vals = append(vals, "(?,?,?)")
+		dargs = append(dargs, i, lo.UnixMilli(), lo.AddDate(0, 0, 1).UnixMilli())
 	}
-	rows, err = a.DB.Query(`SELECT ts, direction FROM mail_log WHERE ts >= ? AND status IN ('delivered','sent','spam')`, start.UnixMilli())
+	rows, err = a.DB.Query(`WITH d(i, lo, hi) AS (VALUES `+strings.Join(vals, ",")+`)
+		SELECT d.i, (SELECT COUNT(*) FROM mail_log WHERE ts >= d.lo AND ts < d.hi AND direction = 'out' AND status IN ('delivered','sent','spam')),
+		            (SELECT COUNT(*) FROM mail_log WHERE ts >= d.lo AND ts < d.hi AND direction <> 'out' AND status IN ('delivered','sent','spam'))
+		FROM d`, dargs...)
 	if err == nil {
 		for rows.Next() {
-			var ts int64
-			var dir string
-			rows.Scan(&ts, &dir)
-			k := time.UnixMilli(ts).Format("2006-01-02")
-			if d := idx[k]; d != nil {
-				if dir == "out" {
-					d.Out++
-				} else {
-					d.In++
-				}
-			}
+			var i, out, in int
+			rows.Scan(&i, &out, &in)
+			days[i].Out, days[i].In = out, in
 		}
 		rows.Close()
 	}
@@ -113,7 +114,7 @@ func (a *App) handleAdminCreateUser(w http.ResponseWriter, r *http.Request, u *U
 		generated = true
 	}
 	nu, err := a.CreateUser(NewUser{Name: in.Name, Local: in.Local, DomainID: in.DomainID, Password: in.Password, Role: in.Role,
-		QuotaBytes: in.QuotaMB << 20, Title: in.Title, MustChange: true})
+		QuotaBytes: quotaBytes(in.QuotaMB), Title: in.Title, MustChange: true})
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
@@ -162,11 +163,9 @@ func (a *App) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request, u *U
 		httpError(w, http.StatusBadRequest, "There must be at least one active administrator")
 		return
 	}
-	if in.QuotaMB < 0 {
-		in.QuotaMB = 0
-	}
+	in.QuotaMB = clampQuotaMB(in.QuotaMB)
 	if _, err := a.DB.Exec(`UPDATE users SET name=?, role=?, status=?, quota_bytes=?, title=?, phone=? WHERE id=?`,
-		in.Name, in.Role, in.Status, in.QuotaMB<<20, strings.TrimSpace(in.Title), strings.TrimSpace(in.Phone), id); err != nil {
+		in.Name, in.Role, in.Status, quotaBytes(in.QuotaMB), strings.TrimSpace(in.Title), strings.TrimSpace(in.Phone), id); err != nil {
 		a.internalError(w, err)
 		return
 	}
@@ -595,15 +594,28 @@ func (a *App) handleAdminSetSettings(w http.ResponseWriter, r *http.Request, u *
 	for _, k := range []string{SetMaxMessageMB, SetDefaultQuotaMB, SetTrashDays, SetRelayPort} {
 		if v, ok := vals[k]; ok && v != "" {
 			n, err := strconv.Atoi(v)
-			if err != nil || n < 0 || (k == SetMaxMessageMB && (n < 1 || n > 100)) {
+			if err != nil || n < 0 || (k == SetMaxMessageMB && (n < 1 || n > 100)) || (k == SetRelayPort && (n < 1 || n > 65535)) ||
+				(k == SetDefaultQuotaMB && n > maxQuotaMB) || (k == SetTrashDays && n > 3650) {
 				httpError(w, http.StatusBadRequest, "Check the number for "+strings.ReplaceAll(k, "_", " "))
 				return
 			}
 		}
 	}
 	if v, ok := vals[SetSpamThreshold]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err != nil || f < 1 || f > 50 {
+		// NaN passes neither "< 1" nor "> 50" and would silently disable score-based filing.
+		if f, err := strconv.ParseFloat(v, 64); err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 1 || f > 50 {
 			httpError(w, http.StatusBadRequest, "Spam threshold must be between 1 and 50")
+			return
+		}
+	}
+	if v, ok := vals[SetRelayHost]; ok && v != "" {
+		v = strings.TrimSuffix(strings.ToLower(v), ".")
+		if strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]") {
+			v = v[1 : len(v)-1] // [2001:db8::1]
+		}
+		vals[SetRelayHost] = v
+		if ip := net.ParseIP(v); ip == nil && !validRelayHost(v) {
+			httpError(w, http.StatusBadRequest, "Enter the relay's host name only, like smtp.example.com (put the port in the Port field)")
 			return
 		}
 	}
@@ -642,4 +654,29 @@ func (a *App) handleAdminTestPort25(w http.ResponseWriter, r *http.Request, u *U
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": strings.HasPrefix(line, "220"), "target": target, "banner": strings.TrimSpace(line),
 		"ms": time.Since(start).Milliseconds(), "message": "Outbound port 25 is open — this server can deliver mail directly."})
+}
+
+// maxQuotaMB caps mailbox sizes (16 TiB) so MB→bytes can't overflow into "unlimited".
+const maxQuotaMB = 1 << 24
+
+func clampQuotaMB(mb int64) int64 {
+	return min(max(mb, 0), maxQuotaMB)
+}
+
+func quotaBytes(mb int64) int64 { return clampQuotaMB(mb) << 20 }
+
+var reHostLabel = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$`)
+
+// validRelayHost accepts any plain host name — including single-label Docker service names
+// like "postfix" — but not a "host:port" or anything with spaces.
+func validRelayHost(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(h, ".") {
+		if !reHostLabel.MatchString(l) {
+			return false
+		}
+	}
+	return true
 }

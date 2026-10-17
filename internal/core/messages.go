@@ -147,13 +147,15 @@ func (a *App) mailboxFull(userID, size int64) bool {
 	return quota > 0 && (used >= quota || used+size > quota)
 }
 
-// duplicateOf returns the ID of an identical message (same Message-ID, same folder) already stored.
+// duplicateOf returns the ID of an identical received message (same Message-ID) already stored
+// in any folder but Sent — a sender's retry after the user archived or deleted the first copy
+// must not bring it back.
 func (a *App) duplicateOf(userID int64, m *Meta, folder string) int64 {
 	if m.MessageID == "" || folder == "sent" {
 		return 0
 	}
 	var dup int64
-	a.DB.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder=? LIMIT 1`, userID, m.MessageID, folder).Scan(&dup)
+	a.DB.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder<>'sent' AND NOT (folder IN ('trash','spam') AND prev_folder='sent') LIMIT 1`, userID, m.MessageID).Scan(&dup)
 	return dup
 }
 
@@ -162,6 +164,13 @@ func normSubject(s string) string {
 	s = strings.ToLower(strings.Join(strings.Fields(s), " "))
 	for {
 		t := strings.TrimSpace(s)
+		// Leading tags added by gateways and lists: "[EXTERNAL] Re: Budget", "[team] Budget".
+		if strings.HasPrefix(t, "[") {
+			if j := strings.IndexByte(t, ']'); j > 0 && j <= 40 && strings.TrimSpace(t[j+1:]) != "" {
+				s = t[j+1:]
+				continue
+			}
+		}
 		i := strings.IndexByte(t, ':')
 		if i <= 0 || i > 8 {
 			return t
@@ -186,10 +195,10 @@ func (a *App) insertMessage(userID int64, rel string, size int64, m *Meta, o Del
 	}
 	defer tx.Rollback()
 
-	// Duplicate suppression: the same Message-ID delivered twice to the same folder.
+	// Duplicate suppression: the same Message-ID received twice (Sent copies don't count).
 	if m.MessageID != "" && o.Folder != "sent" {
 		var dup int64
-		if err := tx.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder=? LIMIT 1`, userID, m.MessageID, o.Folder).Scan(&dup); err == nil {
+		if err := tx.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder<>'sent' AND NOT (folder IN ('trash','spam') AND prev_folder='sent') LIMIT 1`, userID, m.MessageID).Scan(&dup); err == nil {
 			return dup, errDuplicate
 		}
 	}
@@ -222,23 +231,38 @@ func (a *App) insertMessage(userID int64, rel string, size int64, m *Meta, o Del
 		if len(ids) > 50 {
 			ids = ids[len(ids)-50:]
 		}
-		q := `SELECT thread_id, subject FROM messages WHERE user_id=? AND thread_id>0 AND message_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `) ORDER BY date DESC LIMIT 1`
+		// Newest first; join the first referenced message whose subject matches.
+		q := `SELECT thread_id, subject FROM messages WHERE user_id=? AND thread_id>0 AND message_id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `) ORDER BY date DESC LIMIT 100`
 		args := []any{userID}
 		for _, x := range ids {
 			args = append(args, x)
 		}
-		var tid int64
-		var ts string
-		tx.QueryRow(q, args...).Scan(&tid, &ts)
-		thread = join(tid, ts)
+		if rows, err := tx.Query(q, args...); err == nil {
+			for rows.Next() && thread == 0 {
+				var tid int64
+				var ts string
+				if rows.Scan(&tid, &ts) == nil {
+					thread = join(tid, ts)
+				}
+			}
+			rows.Close()
+		}
 	}
 	if thread == 0 && m.MessageID != "" && !strings.ContainsAny(m.MessageID, " \t") {
 		// A reply can arrive before its parent: link messages that already reference this one.
 		// instr() matches literally (no LIKE wildcards).
 		var tid int64
 		var ts string
-		tx.QueryRow(`SELECT thread_id, subject FROM messages WHERE user_id=? AND (in_reply_to=? OR instr(' ' || refs || ' ', ?) > 0) LIMIT 1`,
-			userID, m.MessageID, " "+m.MessageID+" ").Scan(&tid, &ts)
+		tx.QueryRow(`SELECT m.thread_id, m.subject FROM message_refs r JOIN messages m ON m.id = r.msg_id WHERE r.user_id=? AND r.ref=? LIMIT 1`,
+			userID, m.MessageID).Scan(&tid, &ts)
+		thread = join(tid, ts)
+	}
+	if thread == 0 && m.InReplyTo != "" {
+		// Siblings: another reply to the same (not yet received) parent.
+		var tid int64
+		var ts string
+		tx.QueryRow(`SELECT m.thread_id, m.subject FROM message_refs r JOIN messages m ON m.id = r.msg_id
+			WHERE r.user_id=? AND r.ref=? AND m.thread_id>0 ORDER BY m.date DESC LIMIT 1`, userID, m.InReplyTo).Scan(&tid, &ts)
 		thread = join(tid, ts)
 	}
 
@@ -259,14 +283,38 @@ func (a *App) insertMessage(userID int64, rel string, size int64, m *Meta, o Del
 			return 0, err
 		}
 	}
+	// Index In-Reply-To/References so a later parent can find its early replies without a scan.
+	refSeen := map[string]bool{}
+	for _, r := range append(append([]string{}, m.Refs...), m.InReplyTo) {
+		if r == "" || strings.ContainsAny(r, " \t") || refSeen[r] {
+			continue
+		}
+		refSeen[r] = true
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO message_refs(user_id, ref, msg_id) VALUES(?,?,?)`, userID, r, id); err != nil {
+			return 0, err
+		}
+	}
 	body := m.Text
 	if len(body) > 200*1024 {
 		body = body[:200*1024]
 	}
+	// Message IDs can be reused after deletes; clear any stale index entry for this ID first.
+	if _, err := tx.Exec(`DELETE FROM messages_fts WHERE rowid=?`, id); err != nil {
+		return 0, err
+	}
 	if _, err := tx.Exec(`INSERT INTO messages_fts(rowid, subject, addrs, body) VALUES(?,?,?,?)`, id, m.Subject, addrsText(m, o.Bcc), body); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(`UPDATE users SET used_bytes = used_bytes + ? WHERE id=?`, size, userID); err != nil {
+	if o.EnforceQuota {
+		// Checked again inside the write transaction: parallel deliveries can't overshoot the quota.
+		res, err := tx.Exec(`UPDATE users SET used_bytes = used_bytes + ? WHERE id=? AND (quota_bytes <= 0 OR used_bytes + ? <= quota_bytes)`, size, userID, size)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return 0, ErrQuota
+		}
+	} else if _, err := tx.Exec(`UPDATE users SET used_bytes = used_bytes + ? WHERE id=?`, size, userID); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit()
@@ -320,6 +368,8 @@ type ThreadRow struct {
 }
 
 // folderCond returns the SQL condition selecting messages for a view.
+var errUnknownFolder = errors.New("unknown folder")
+
 func folderCond(folder string) (string, []any, error) {
 	switch folder {
 	case "starred":
@@ -330,12 +380,13 @@ func folderCond(folder string) (string, []any, error) {
 	if realFolders[folder] {
 		return `folder=?`, []any{folder}, nil
 	}
-	return "", nil, errors.New("unknown folder")
+	return "", nil, errUnknownFolder
 }
 
 // searchCond turns a Gmail-style query into SQL.
 // Supports: from: to: subject: in: is:unread|read|starred has:attachment after:YYYY-MM-DD before:YYYY-MM-DD and free text.
 func searchCond(q string) (string, []any) {
+	q = strings.ReplaceAll(q, "\x00", "")
 	var conds []string
 	var args []any
 	var free []string
@@ -413,6 +464,9 @@ func searchCond(q string) (string, []any) {
 			args = append(args, strings.Join(terms, " "))
 		}
 	}
+	if len(conds) == 0 {
+		return "1", nil
+	}
 	return strings.Join(conds, " AND "), args
 }
 
@@ -440,10 +494,18 @@ func tokenizeQuery(q string) []string {
 }
 
 // ListThreads returns a page of conversations for a folder or search query.
+//
+// Conversations are ranked by their newest matching message (received_at DESC, id DESC) and
+// aggregate only the messages matching the view — the same result as one window query over
+// the whole folder, without computing it for every conversation:
+//   - folder views walk a covering index newest-first and stop after offset+limit threads;
+//   - searches run their (FTS/LIKE) filter once and page the matches in Go;
+//   - then only the messages of the page's threads are loaded and aggregated.
 func (a *App) ListThreads(userID int64, folder, query string, offset, limit int) ([]ThreadRow, int, error) {
+	search := strings.TrimSpace(query) != ""
 	var cond string
 	var args []any
-	if strings.TrimSpace(query) != "" {
+	if search {
 		cond, args = searchCond(query)
 	} else {
 		c, ar, err := folderCond(folder)
@@ -454,61 +516,160 @@ func (a *App) ListThreads(userID int64, folder, query string, offset, limit int)
 	}
 	where := `user_id=? AND ` + cond
 	wargs := append([]any{userID}, args...)
+	out := []ThreadRow{}
 
 	var total int
-	if err := a.DB.QueryRow(`SELECT COUNT(DISTINCT thread_id) FROM messages WHERE `+where, wargs...).Scan(&total); err != nil {
-		return nil, 0, err
+	var page []int64
+	var pageIDs []int64 // search: the matching messages of the page's threads
+	if search {
+		rows, err := a.DB.Query(`SELECT id, thread_id FROM messages WHERE `+where+` ORDER BY +received_at DESC, +id DESC`, wargs...) // "+": all matches are read anyway, so let WHERE pick the index
+		if err != nil {
+			return nil, 0, err
+		}
+		pos := map[int64]int{} // thread -> rank
+		var order []int64
+		ids := map[int64][]int64{}
+		for rows.Next() {
+			var id, tid int64
+			if err := rows.Scan(&id, &tid); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			r, ok := pos[tid]
+			if !ok {
+				r = len(order)
+				pos[tid] = r
+				order = append(order, tid)
+			}
+			if r >= offset && r < offset+limit {
+				ids[tid] = append(ids[tid], id)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, 0, err
+		}
+		total = len(order)
+		if offset < len(order) {
+			page = order[offset:min(len(order), offset+limit)]
+		}
+		for _, t := range page {
+			pageIDs = append(pageIDs, ids[t]...)
+		}
+	} else {
+		countQ := `SELECT COUNT(DISTINCT thread_id) FROM messages WHERE ` + where
+		if folder == "all" {
+			// merge three sorted index ranges instead of de-duplicating ~all rows in a temp B-tree
+			countQ = `SELECT COUNT(*) FROM (SELECT thread_id FROM messages WHERE user_id=?1 AND folder='inbox'
+				UNION SELECT thread_id FROM messages WHERE user_id=?1 AND folder='archive'
+				UNION SELECT thread_id FROM messages WHERE user_id=?1 AND folder='sent')`
+		}
+		if err := a.DB.QueryRow(countQ, wargs...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
+		if offset >= total {
+			return out, total, nil
+		}
+		rows, err := a.DB.Query(`SELECT thread_id FROM messages WHERE `+where+` ORDER BY received_at DESC, id DESC`, wargs...)
+		if err != nil {
+			return nil, 0, err
+		}
+		seenT := make(map[int64]bool, offset+limit)
+		for rows.Next() {
+			var tid int64
+			if err := rows.Scan(&tid); err != nil {
+				rows.Close()
+				return nil, 0, err
+			}
+			if seenT[tid] {
+				continue
+			}
+			seenT[tid] = true
+			if len(seenT) > offset {
+				page = append(page, tid)
+				if len(page) == limit {
+					break
+				}
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, 0, err
+		}
 	}
-	q := `WITH f AS (
-	  SELECT id, thread_id, folder, from_addr, from_name, to_json, subject, snippet, received_at, seen, flagged, has_attach,
-	    ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY received_at DESC, id DESC) AS rn,
-	    COUNT(*) OVER w AS cnt, SUM(1 - seen) OVER w AS unread, MAX(flagged) OVER w AS fl, MAX(has_attach) OVER w AS att,
-	    GROUP_CONCAT(id, ',') OVER w AS ids,
-	    GROUP_CONCAT(from_name || char(31) || from_addr, char(30)) OVER w AS people
-	  FROM messages WHERE ` + where + `
-	  WINDOW w AS (PARTITION BY thread_id ORDER BY received_at ASC, id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-	) SELECT thread_id, folder, from_addr, to_json, subject, snippet, received_at, cnt, unread, fl, att, ids, people
-	  FROM f WHERE rn = 1 ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?`
-	rows, err := a.DB.Query(q, append(wargs, limit, offset)...)
+	if len(page) == 0 {
+		return out, total, nil
+	}
+
+	// Look the owner up before opening rows: a second query while rows is open needs a
+	// second pool connection, which deadlocks the pool once MaxOpenConns requests do it.
+	var owner string
+	a.DB.QueryRow(`SELECT email FROM users WHERE id=?`, userID).Scan(&owner)
+
+	const cols = `SELECT id, thread_id, folder, from_addr, from_name, to_json, subject, snippet, received_at, seen, flagged, has_attach FROM messages `
+	var rows *sql.Rows
+	var err error
+	if search {
+		idj, _ := json.Marshal(pageIDs)
+		rows, err = a.DB.Query(cols+`WHERE id IN (SELECT value FROM json_each(?)) ORDER BY thread_id, received_at ASC, id ASC`, string(idj))
+	} else {
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(page)), ",")
+		dargs := append([]any{}, wargs...)
+		for _, t := range page {
+			dargs = append(dargs, t)
+		}
+		rows, err = a.DB.Query(cols+`WHERE `+where+` AND thread_id IN (`+ph+`) ORDER BY thread_id, received_at ASC, id ASC`, dargs...)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
 	defer rows.Close()
-	var owner string
-	a.DB.QueryRow(`SELECT email FROM users WHERE id=?`, userID).Scan(&owner)
-	out := []ThreadRow{}
+	type agg struct {
+		r      ThreadRow
+		toJSON string
+		seen   map[string]bool
+	}
+	byT := make(map[int64]*agg, len(page))
 	for rows.Next() {
-		var r ThreadRow
-		var toJSON, ids, people string
-		var unread int
-		if err := rows.Scan(&r.ThreadID, &r.Folder, &r.FromEmail, &toJSON, &r.Subject, &r.Snippet, &r.Date, &r.Count, &unread, &r.Flagged, &r.HasAttach, &ids, &people); err != nil {
+		var id, tid, date int64
+		var fold, fromAddr, fromName, toJSON, subject, snippet string
+		var seen, flagged, att bool
+		if err := rows.Scan(&id, &tid, &fold, &fromAddr, &fromName, &toJSON, &subject, &snippet, &date, &seen, &flagged, &att); err != nil {
 			return nil, 0, err
 		}
-		r.Unread = unread > 0
-		json.Unmarshal([]byte(toJSON), &r.To)
-		for _, s := range strings.Split(ids, ",") {
-			var id int64
-			fmt.Sscan(s, &id)
-			if id > 0 {
-				r.IDs = append(r.IDs, id)
-			}
+		g := byT[tid]
+		if g == nil {
+			g = &agg{seen: map[string]bool{}}
+			g.r.ThreadID = tid
+			byT[tid] = g
 		}
-		seen := map[string]bool{}
-		for _, p := range strings.Split(people, "\x1e") {
-			name, addr, _ := strings.Cut(p, "\x1f")
-			if addr == "" || seen[strings.ToLower(addr)] {
-				continue
-			}
-			seen[strings.ToLower(addr)] = true
-			if strings.EqualFold(addr, owner) {
+		r := &g.r
+		r.Count++
+		r.IDs = append(r.IDs, id)
+		r.Unread = r.Unread || !seen
+		r.Flagged = r.Flagged || flagged
+		r.HasAttach = r.HasAttach || att
+		// rows are oldest-first, so the last one wins = newest message
+		r.Folder, r.FromEmail, g.toJSON, r.Subject, r.Snippet, r.Date = fold, fromAddr, toJSON, subject, snippet, date
+		if la := strings.ToLower(fromAddr); fromAddr != "" && !g.seen[la] {
+			g.seen[la] = true
+			if strings.EqualFold(fromAddr, owner) {
 				r.Participants = append(r.Participants, "me")
 			} else {
-				r.Participants = append(r.Participants, firstNonEmpty(name, addr))
+				r.Participants = append(r.Participants, firstNonEmpty(fromName, fromAddr))
 			}
 		}
-		out = append(out, r)
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	for _, t := range page {
+		if g := byT[t]; g != nil { // nil: changed between the queries
+			json.Unmarshal([]byte(g.toJSON), &g.r.To)
+			out = append(out, g.r)
+		}
+	}
+	return out, total, nil
 }
 
 // FolderCounts returns unread conversation counts (and draft totals).
@@ -654,11 +815,20 @@ func (a *App) ThreadView(userID, threadID int64, context string, markSeen bool) 
 
 // ThreadAction applies an action to conversations as seen from a view.
 func (a *App) ThreadAction(userID int64, threadIDs []int64, view, action string) error {
+	_, err := a.ThreadActionIDs(userID, threadIDs, view, action, nil)
+	return err
+}
+
+// ThreadActionIDs applies action to conversations as seen in view. For moves (archive, trash,
+// spam, inbox) it returns the IDs of the messages that actually moved, so an Undo can move back
+// exactly those — not messages of the same conversation that were already there. A non-nil
+// onlyIDs limits the action to those messages.
+func (a *App) ThreadActionIDs(userID int64, threadIDs []int64, view, action string, onlyIDs []int64) ([]int64, error) {
 	if len(threadIDs) == 0 {
-		return nil
+		return nil, nil
 	}
-	if len(threadIDs) > 1000 {
-		return errors.New("too many conversations")
+	if len(threadIDs) > 1000 || len(onlyIDs) > 100000 {
+		return nil, errors.New("too many conversations")
 	}
 	scope, sargs, err := folderCond(view)
 	if err != nil {
@@ -670,12 +840,33 @@ func (a *App) ThreadAction(userID int64, threadIDs []int64, view, action string)
 	for _, t := range threadIDs {
 		bargs = append(bargs, t)
 	}
+	if onlyIDs != nil {
+		b, _ := json.Marshal(onlyIDs)
+		base += ` AND id IN (SELECT value FROM json_each(?))`
+		bargs = append(bargs, string(b))
+	}
 	inScope := base + ` AND ` + scope
 	iargs := append(append([]any{}, bargs...), sargs...)
 
 	exec := func(q string, args ...any) error {
 		_, err := a.DB.Exec(q, args...)
 		return err
+	}
+	var moved []int64
+	move := func(q string, args ...any) error {
+		rows, err := a.DB.Query(q+` RETURNING id`, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			moved = append(moved, id)
+		}
+		return rows.Err()
 	}
 	switch action {
 	case "read":
@@ -693,33 +884,33 @@ func (a *App) ThreadAction(userID int64, threadIDs []int64, view, action string)
 	case "unstar":
 		err = exec(`UPDATE messages SET flagged=0 WHERE `+base, bargs...)
 	case "archive":
-		err = exec(`UPDATE messages SET folder='archive' WHERE `+base+` AND folder='inbox'`, bargs...)
+		err = move(`UPDATE messages SET folder='archive' WHERE `+base+` AND folder='inbox'`, bargs...)
 	case "inbox":
 		// Restore: messages go back where they came from (sent stays sent).
 		// From Trash, messages return to the folder they were deleted from.
-		err = exec(`UPDATE messages SET folder = CASE
+		err = move(`UPDATE messages SET folder = CASE
 				WHEN folder='trash' AND prev_folder IN ('inbox','archive','sent') THEN prev_folder
 				WHEN prev_folder='sent' THEN 'sent'
 				WHEN folder='trash' AND prev_folder='' AND from_addr IN (SELECT email FROM users WHERE id=?) THEN 'sent'
 				ELSE 'inbox' END, prev_folder='', trashed_at=0
 			WHERE `+inScope, append([]any{userID}, iargs...)...)
 	case "trash":
-		err = exec(`UPDATE messages SET prev_folder=folder, folder='trash', trashed_at=? WHERE `+inScope+` AND folder <> 'trash'`, append([]any{nowMs()}, iargs...)...)
+		err = move(`UPDATE messages SET prev_folder=folder, folder='trash', trashed_at=? WHERE `+inScope+` AND folder <> 'trash'`, append([]any{nowMs()}, iargs...)...)
 	case "spam":
-		err = exec(`UPDATE messages SET prev_folder=folder, folder='spam', trashed_at=? WHERE `+inScope+` AND folder NOT IN ('sent','spam')`, append([]any{nowMs()}, iargs...)...)
+		err = move(`UPDATE messages SET prev_folder=folder, folder='spam', trashed_at=? WHERE `+inScope+` AND folder NOT IN ('sent','spam')`, append([]any{nowMs()}, iargs...)...)
 	case "delete":
 		if view != "trash" && view != "spam" {
-			return errors.New("Only messages in Trash or Spam can be deleted forever")
+			return nil, errors.New("Only messages in Trash or Spam can be deleted forever")
 		}
 		err = a.deleteMessages(`SELECT id, size, blob FROM messages WHERE `+inScope, iargs...)
 	default:
-		return errors.New("unknown action")
+		return nil, errors.New("unknown action")
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	a.Events.Publish(userID, Event{Type: "sync"})
-	return nil
+	return moved, nil
 }
 
 // SetFlag stars / unstars a single message.

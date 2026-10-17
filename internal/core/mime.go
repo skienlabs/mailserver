@@ -161,11 +161,17 @@ func MIMETooComplex(raw []byte) bool {
 		} else {
 			line, raw = raw[:i], raw[i+1:]
 		}
-		if len(line) < 13 || (line[0] != 'C' && line[0] != 'c') || !bytes.EqualFold(line[:13], []byte("content-type:")) {
+		if len(line) < 13 || (line[0] != 'C' && line[0] != 'c') {
+			continue
+		}
+		// The parser tolerates whitespace between a field name and its colon ("Content-Type :"),
+		// so match the same way or the limits could be sidestepped.
+		colon := bytes.IndexByte(line, ':')
+		if colon < 12 || !bytes.EqualFold(bytes.TrimRight(line[:colon], " \t"), []byte("content-type")) {
 			continue
 		}
 		parts++
-		val := line[13:]
+		val := line[colon+1:]
 		if len(raw) > 0 && (raw[0] == ' ' || raw[0] == '\t') { // folded value
 			if j := bytes.IndexByte(raw, '\n'); j > 0 {
 				val = append(append([]byte{}, val...), raw[:j]...)

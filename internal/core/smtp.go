@@ -421,6 +421,17 @@ func (s *session) dataSubmission(raw []byte) error {
 			return smtpErr(553, smtp.EnhancedCode{5, 7, 1}, "You are not allowed to send as "+senders[0].Email)
 		}
 	}
+	// Some apps and scripts leave these out; big providers reject mail without a Message-ID.
+	var extra []byte
+	if !hasHeader(raw, "Message-ID") {
+		extra = fmt.Appendf(extra, "Message-ID: <%s.%s@%s>\r\n", time.Now().UTC().Format("20060102150405"), RandomHex(8), s.a.Hostname())
+	}
+	if !hasHeader(raw, "Date") {
+		extra = fmt.Appendf(extra, "Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+	}
+	if extra != nil {
+		raw = append(extra, raw...)
+	}
 	meta := ParseMeta(raw)
 	if !s.a.limiter.Allow(fmt.Sprintf("send:%d", s.user.ID), 400, time.Hour) {
 		return smtpErr(450, smtp.EnhancedCode{4, 7, 1}, "Sending limit reached, try again later")
@@ -434,44 +445,68 @@ func (s *session) dataSubmission(raw []byte) error {
 	return nil
 }
 
+// hasHeader reports whether the message's header block contains the named field.
+func hasHeader(raw []byte, name string) bool {
+	for pos := 0; pos < len(raw); {
+		n := bytes.IndexByte(raw[pos:], '\n')
+		line := raw[pos:]
+		if n >= 0 {
+			line = raw[pos : pos+n]
+		}
+		line = bytes.TrimSuffix(line, []byte("\r"))
+		if len(line) == 0 {
+			return false // end of headers
+		}
+		if line[0] != ' ' && line[0] != '\t' {
+			if c := bytes.IndexByte(line, ':'); c > 0 && strings.EqualFold(strings.TrimRight(string(line[:c]), " \t"), name) {
+				return true
+			}
+		}
+		if n < 0 {
+			break
+		}
+		pos += n + 1
+	}
+	return false
+}
+
 // stripHeader removes every occurrence of a header (with folded lines) from a raw message.
+// A message may consist of headers only (no blank line, no body); field names are matched
+// the way the parser reads them, tolerating whitespace before the colon ("Bcc :").
 func stripHeader(raw []byte, name string) []byte {
-	end := bytes.Index(raw, []byte("\r\n\r\n"))
-	sep := 4
-	if end < 0 {
-		end = bytes.Index(raw, []byte("\n\n"))
-		sep = 2
+	headEnd := len(raw)
+	for pos := 0; pos < len(raw); {
+		n := bytes.IndexByte(raw[pos:], '\n')
+		if n < 0 {
+			break
+		}
+		line := raw[pos : pos+n+1]
+		if len(line) == 1 || (len(line) == 2 && line[0] == '\r') {
+			headEnd = pos
+			break
+		}
+		pos += n + 1
 	}
-	if end < 0 {
-		return raw
-	}
-	head := raw[:end]
-	lines := bytes.SplitAfter(head, []byte("\n"))
 	var out bytes.Buffer
+	out.Grow(len(raw))
 	skipping := false
-	prefix := strings.ToLower(name) + ":"
-	for _, l := range lines {
-		if len(l) > 0 && (l[0] == ' ' || l[0] == '\t') {
+	for _, l := range bytes.SplitAfter(raw[:headEnd], []byte("\n")) {
+		if len(l) == 0 {
+			continue
+		}
+		if l[0] == ' ' || l[0] == '\t' {
 			if skipping {
 				continue
 			}
 		} else {
-			skipping = strings.HasPrefix(strings.ToLower(string(l)), prefix)
-			if skipping {
+			skipping = false
+			if c := bytes.IndexByte(l, ':'); c > 0 && strings.EqualFold(strings.TrimRight(string(l[:c]), " \t"), name) {
+				skipping = true
 				continue
 			}
 		}
 		out.Write(l)
 	}
-	nl := "\r\n"
-	if sep == 2 {
-		nl = "\n"
-	}
-	res := out.Bytes()
-	if !bytes.HasSuffix(res, []byte("\n")) {
-		res = append(res, nl...)
-	}
-	// re-attach the blank separator line and the body
-	res = append(res, raw[end+len(nl):]...)
-	return res
+	out.Write(raw[headEnd:])
+	return out.Bytes()
 }

@@ -24,6 +24,9 @@ func newTestApp(t *testing.T, withSMTP bool) (*App, *Domain, *User, *User) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("SM_TEST_ONECONN") == "1" {
+		app.DB.SetMaxOpenConns(1)
+	}
 	if withSMTP {
 		if err := app.startSMTP(); err != nil {
 			t.Fatal(err)

@@ -53,7 +53,7 @@ func (u *User) IsAdmin() bool { return u.Role == "admin" }
 
 var (
 	reLocal  = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$`)
-	reDomain = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+	reDomain = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$`)
 )
 
 // ValidLocalPart checks the left-hand side of an address we create.
@@ -244,7 +244,7 @@ type NewUser struct {
 }
 
 func (a *App) CreateUser(n NewUser) (*User, error) {
-	n.Name = strings.TrimSpace(n.Name)
+	n.Name = strings.TrimSpace(sanitizeHeaderValue(n.Name))
 	n.Local = strings.ToLower(strings.TrimSpace(n.Local))
 	if n.Name == "" || len(n.Name) > 120 {
 		return nil, errors.New("Enter a name")
@@ -308,26 +308,19 @@ func (a *App) DeleteUser(id int64) error {
 	if u.IsAdmin() && u.Status == "active" && a.adminCount() <= 1 {
 		return errors.New("You can't remove the last administrator")
 	}
-	rows, err := a.DB.Query(`SELECT id FROM messages WHERE user_id=?`, id)
-	if err != nil {
-		return err
-	}
-	var ids []int64
-	for rows.Next() {
-		var mid int64
-		rows.Scan(&mid)
-		ids = append(ids, mid)
-	}
-	rows.Close()
+	// One write transaction (BEGIN IMMEDIATE): mail delivered concurrently can't slip in between
+	// clearing the search index and deleting the messages, which would leave index rows behind.
 	tx, err := a.DB.Begin()
 	if err != nil {
 		return err
 	}
-	for _, mid := range ids {
-		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE rowid=?`, mid); err != nil {
-			tx.Rollback()
-			return err
-		}
+	if _, err := tx.Exec(`DELETE FROM messages_fts WHERE rowid IN (SELECT id FROM messages WHERE user_id=?)`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM messages WHERE user_id=?`, id); err != nil {
+		tx.Rollback()
+		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM users WHERE id=?`, id); err != nil {
 		tx.Rollback()
@@ -406,7 +399,7 @@ type AliasInput struct {
 }
 
 func (a *App) SaveAlias(id int64, in AliasInput) (int64, error) {
-	in.Name = strings.TrimSpace(in.Name)
+	in.Name = strings.TrimSpace(sanitizeHeaderValue(in.Name))
 	in.Description = strings.TrimSpace(in.Description)
 	if len(in.Members) == 0 {
 		return 0, errors.New("Add at least one member")
@@ -426,7 +419,9 @@ func (a *App) SaveAlias(id int64, in AliasInput) (int64, error) {
 			return 0, errors.New("Unknown domain")
 		}
 		addr := in.Local + "@" + d.Name
-		if a.addressTaken(addr) {
+		var taken int // checked on the transaction's own connection (no second pool connection)
+		tx.QueryRow(`SELECT (SELECT COUNT(*) FROM users WHERE email=?) + (SELECT COUNT(*) FROM aliases WHERE address=?)`, addr, addr).Scan(&taken)
+		if taken > 0 {
 			return 0, fmt.Errorf("%s is already in use", addr)
 		}
 		res, err := tx.Exec(`INSERT INTO aliases(domain_id, address, name, description, created_at) VALUES(?,?,?,?,?)`, d.ID, addr, in.Name, in.Description, nowMs())

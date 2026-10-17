@@ -160,7 +160,7 @@ async function userDialog(u) {
     body: html`<form id="ufm" autocomplete="off">
       ${editing ? html`<div style="display:flex;gap:16px;align-items:center;margin:8px 0">${avatar(u.name, u.email, 's64')}<button type="button" class="btn sm tonal" id="u-photo">${icon('upload')}Photo</button><input type="file" id="u-photo-in" accept="image/png,image/jpeg" hidden></div>` : ''}
       ${field({ label: 'Full name', name: 'name', value: u?.name || '', attrs: 'autofocus maxlength="120"' })}
-      ${editing ? '' : html`<div class="row2" style="grid-template-columns:1fr ${doms.length > 1 ? '1fr' : 'auto'}">
+      ${editing ? '' : html`<div class="row2" style="${doms.length > 1 ? '' : 'grid-template-columns:1fr'}">
           ${field({ label: 'Username', name: 'local', attrs: 'autocapitalize="off" spellcheck="false"', addon: doms.length === 1 ? '@' + doms[0].name : '' })}
           ${doms.length > 1 ? selectField({ label: 'Domain', name: 'domain_id', options: doms.map((d) => ({ value: d.id, label: '@' + d.name })), value: doms[0].id }) : html`<input type="hidden" name="domain_id" value="${doms[0].id}">`}
         </div>`}
@@ -288,7 +288,7 @@ async function groupDialog(g, usersList) {
     title: g ? `Edit ${g.address}` : 'New group',
     wide: true,
     body: html`<form id="gfm" autocomplete="off">
-      ${g ? '' : html`<div class="row2" style="grid-template-columns:1fr ${doms.length > 1 ? '1fr' : 'auto'}">
+      ${g ? '' : html`<div class="row2" style="${doms.length > 1 ? '' : 'grid-template-columns:1fr'}">
         ${field({ label: 'Address', name: 'local', attrs: 'autofocus autocapitalize="off" spellcheck="false"', addon: doms.length === 1 ? '@' + doms[0].name : '', hint: 'e.g. info, support, team' })}
         ${doms.length > 1 ? selectField({ label: 'Domain', name: 'domain_id', options: doms.map((d) => ({ value: d.id, label: '@' + d.name })), value: doms[0].id }) : html`<input type="hidden" name="domain_id" value="${doms[0].id}">`}
       </div>`}

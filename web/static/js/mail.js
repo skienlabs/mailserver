@@ -48,8 +48,8 @@ const viewOf = (r) => (r.folder === 'search' ? 'search' : r.folder);
 const MOVE_MSG = { archive: 'Archived', trash: 'Moved to Trash', spam: 'Reported as spam', inbox: 'Moved to Inbox', delete: 'Deleted forever' };
 const UNDO = { archive: ['archive', 'inbox'], trash: ['trash', 'inbox'], spam: ['spam', 'inbox'] };
 
-async function act(threads, view, action, { undo = true, quiet = false } = {}) {
-  const res = await api('/threads/action', { method: 'POST', body: { threads, view, action } });
+async function act(threads, view, action, { undo = true, quiet = false, ids } = {}) {
+  const res = await api('/threads/action', { method: 'POST', body: { threads, view, action, ...(ids ? { ids } : {}) } });
   setCounts(res.counts);
   cache.clear();
   if (quiet || !MOVE_MSG[action]) return;
@@ -59,7 +59,8 @@ async function act(threads, view, action, { undo = true, quiet = false } = {}) {
   snack(label, u ? {
     action: 'Undo',
     onAction: async () => {
-      try { await act(threads, u[0], u[1], { quiet: true }); snack('Action undone'); onRemoteChange(true); } catch (e) { toastError(e); }
+      // Move back only the messages this action moved, not older ones of the same conversation.
+      try { await act(threads, u[0], u[1], { quiet: true, ids: res.ids }); snack('Action undone'); onRemoteChange(true); } catch (e) { toastError(e); }
     },
   } : {});
 }
@@ -74,7 +75,7 @@ export async function renderList(viewEl, r, prev) {
   S.lastList = listHash(r);
   const cached = cache.get(key);
   paintListFrame(viewEl, state);
-  if (cached) { state.items = cached.items; state.total = cached.total; lastItems = cached.items; paintRows(state); }
+  if (cached) { state.items = cached.items; state.total = cached.total; state.loaded = true; lastItems = cached.items; paintRows(state); }
   else paintSkeleton();
   await loadList(state);
   // Coming back from a conversation: focus the row we came from
@@ -85,13 +86,26 @@ export async function renderList(viewEl, r, prev) {
 }
 
 async function loadList(state) {
+  // one request per list at a time: changes during a load trigger exactly one more load
+  if (state.loading) { state.again = true; return state.loading; }
+  state.loading = loadListOnce(state).finally(() => {
+    state.loading = null;
+    if (state.again && current === state) { state.again = false; loadList(state); }
+  });
+  return state.loading;
+}
+
+async function loadListOnce(state) {
   const r = state.r;
   const q = `${apiQuery(r)}&offset=${(r.page - 1) * PAGE}&limit=${PAGE}`;
+  const userRefresh = state.userRefresh;
+  state.userRefresh = false;
   try {
     const res = await api(`/threads?${q}`, { background: state.items.length > 0 });
     if (current !== state) return;
     state.items = res.items;
     state.total = res.total;
+    state.loaded = true;
     lastItems = res.items;
     cache.set(state.key, { items: res.items, total: res.total });
     setCounts(res.counts);
@@ -102,8 +116,10 @@ async function loadList(state) {
   } catch (e) {
     if (current === state) {
       const list = $('#list');
-      if (list && !state.items.length) setHTML(list, html`<div class="empty">${icon('cloud_off')}<h3>Couldn't load your mail</h3><p>${e.message}</p><button class="btn tonal" id="retry">Try again</button></div>`);
-      $('#retry')?.addEventListener('click', () => loadList(state));
+      if (list && !state.items.length) {
+        setHTML(list, html`<div class="empty">${icon('cloud_off')}<h3>Couldn't load your mail</h3><p>${e.message}</p><button class="btn tonal" id="retry">Try again</button></div>`);
+        $('#retry')?.addEventListener('click', () => loadList(state));
+      } else if (userRefresh) toastError(e);
     }
   }
 }
@@ -120,7 +136,7 @@ function paintListFrame(viewEl, state) {
       <div class="grow">
         ${r.folder === 'inbox' ? html`<p class="greet">${greeting()}, ${me.name.split(' ')[0]}</p>` : ''}
         <h1>${title}</h1>
-        <p class="sub">${isSearch ? html`for “${r.q}”` : r.folder === 'inbox' ? longDate(Date.now()) : raw('&nbsp;')}</p>
+        ${isSearch ? html`<p class="sub" dir="auto">for “${r.q}”</p>` : r.folder === 'inbox' ? html`<p class="sub">${longDate(Date.now())}</p>` : ''}
         <div class="chips" id="head-chips" style="margin-top:10px">
           ${!isSearch && (r.folder === 'inbox' || r.folder === 'spam') ? html`<span class="pill blue" id="chip-unread">${unread} unread</span>` : ''}
           <span class="pill gray" id="chip-total"></span>
@@ -174,7 +190,7 @@ function paintToolbar(state) {
     else state.selected.clear();
     paintSelection(state);
   };
-  $('#refresh')?.addEventListener('click', () => { cache.delete(state.key); loadList(state); refreshCounts(); });
+  $('#refresh')?.addEventListener('click', () => { cache.delete(state.key); state.userRefresh = true; loadList(state); refreshCounts(); });
   $('#list-more')?.addEventListener('click', (e) => menu(e.currentTarget, [
     { icon: 'mark_email_read', label: 'Mark all on this page as read', onClick: () => bulk(state, 'read', state.items.map((t) => t.thread_id)) },
   ], { align: 'left' }));
@@ -182,7 +198,10 @@ function paintToolbar(state) {
   $('#pg-next').onclick = () => navigate(listHash(r, r.page + 1));
   tb.querySelectorAll('[data-bulk]').forEach((b) => (b.onclick = () => bulk(state, b.dataset.bulk)));
   const chip = $('#chip-total');
-  if (chip) chip.textContent = state.total ? plural(state.total, 'conversation') : 'No conversations';
+  if (chip) {
+    chip.textContent = !state.loaded ? '' : state.total ? plural(state.total, 'conversation') : 'No conversations';
+    chip.hidden = !state.loaded;
+  }
   const cu = $('#chip-unread');
   if (cu) cu.textContent = `${S.counts?.[r.folder] || 0} unread`;
 }
@@ -192,27 +211,29 @@ function rowHTML(t, state, i) {
   const sel = state.selected.has(t.thread_id);
   const sent = r.folder === 'sent';
   let who;
-  if (sent) who = 'To: ' + (t.to || []).map((a) => a.name || a.email.split('@')[0]).join(', ');
+  if (sent) who = 'To: ' + (t.to || []).map((a) => a.name || people.get(a.email)?.name || a.email.split('@')[0]).join(', ');
   else who = (t.participants || []).slice(0, 3).join(', ') + ((t.participants || []).length > 3 ? ' …' : '');
   const showFolder = (r.folder === 'search' || r.folder === 'all' || r.folder === 'starred') && t.folder !== 'inbox';
   const acts = actionsFor(viewOf(r)).slice(0, 3);
   const readAct = t.unread ? ['read', 'mark_email_read', 'Mark as read'] : ['unread', 'mark_email_unread', 'Mark as unread'];
   const firstPerson = sent ? (t.to?.[0] || {}) : { name: t.participants?.[0], email: t.from_email };
-  return html`<div class="row ${t.unread ? 'unread' : ''} ${sel ? 'selected' : ''} ${state.focus === i ? 'focus' : ''}" role="listitem" data-i="${i}" data-tid="${t.thread_id}">
+  const tabStop = i === Math.max(0, state.focus);
+  const label = `${t.unread ? 'Unread, ' : ''}${who}, ${t.subject || 'no subject'}, ${shortDate(t.date)}`;
+  return html`<div class="row ${t.unread ? 'unread' : ''} ${sel ? 'selected' : ''} ${state.focus === i ? 'focus' : ''}" role="listitem" tabindex="${tabStop ? 0 : -1}" aria-label="${label}" data-i="${i}" data-tid="${t.thread_id}">
     <span class="cb-wrap" data-tip="Select"><input type="checkbox" class="cb" tabindex="-1" aria-label="Select" ${sel ? raw('checked') : ''}></span>
-    <button class="icon-btn sm star-btn ${t.flagged ? 'on' : ''}" data-tip="${t.flagged ? 'Starred' : 'Not starred'}" aria-label="Star">${icon(t.flagged ? 'star-f' : 'star_border')}</button>
-    <span class="av-cell">${avatar(firstPerson.name, firstPerson.email)}</span>
-    <span class="who">${who || '(no recipients)'}${t.count > 1 ? html`<span class="n">${t.count}</span>` : ''}</span>
+    <button class="icon-btn sm star-btn ${t.flagged ? 'on' : ''}" tabindex="-1" data-tip="${t.flagged ? 'Starred' : 'Not starred'}" aria-label="Star">${icon(t.flagged ? 'star-f' : 'star_border')}</button>
+    <span class="av-cell" data-tip="Select">${avatar(firstPerson.name, firstPerson.email)}<span class="av-check">${icon('check')}</span></span>
+    <span class="who" dir="auto">${who || '(no recipients)'}${t.count > 1 ? html`<span class="n">${t.count}</span>` : ''}</span>
     <span class="mid">
       ${showFolder ? html`<span class="pill gray folder-tag">${folderName(t.folder)}</span>` : ''}
-      <span class="subj">${t.subject || '(no subject)'}</span>
-      <span class="snip">${t.snippet ? html`<span class="dash"> &nbsp;–&nbsp; </span>${t.snippet}` : ''}</span>
+      <span class="subj" dir="auto">${t.subject || '(no subject)'}</span>
+      <span class="snip" dir="auto">${t.snippet ? html`<span class="dash"> &nbsp;–&nbsp; </span>${t.snippet}` : ''}</span>
     </span>
     ${t.has_attach ? html`<span class="att">${icon('attach_file', 's')}</span>` : ''}
     <span class="date" title="${fullDate(t.date)}">${shortDate(t.date)}</span>
     <span class="hover-acts">
-      ${acts.filter(([a]) => a !== 'read' && a !== 'unread').map(([a, ic, label]) => html`<button class="icon-btn sm" data-row-act="${a}" data-tip="${label}" aria-label="${label}">${icon(ic)}</button>`)}
-      <button class="icon-btn sm" data-row-act="${readAct[0]}" data-tip="${readAct[2]}" aria-label="${readAct[2]}">${icon(readAct[1])}</button>
+      ${acts.filter(([a]) => a !== 'read' && a !== 'unread').map(([a, ic, label]) => html`<button class="icon-btn sm" tabindex="-1" data-row-act="${a}" data-tip="${label}" aria-label="${label}">${icon(ic)}</button>`)}
+      <button class="icon-btn sm" tabindex="-1" data-row-act="${readAct[0]}" data-tip="${readAct[2]}" aria-label="${readAct[2]}">${icon(readAct[1])}</button>
     </span>
   </div>`;
 }
@@ -257,7 +278,7 @@ function wireList(state) {
     const i = +row.dataset.i;
     const t = state.items[i];
     if (!t) return;
-    if (e.target.closest('.cb-wrap')) {
+    if (e.target.closest('.cb-wrap') || e.target.closest('.av-cell')) { // avatar = select on phones
       e.preventDefault();
       if (e.shiftKey && state.lastClick != null) {
         const [a, b] = [Math.min(state.lastClick, i), Math.max(state.lastClick, i)];
@@ -278,6 +299,16 @@ function wireList(state) {
     }
     if (e.ctrlKey || e.metaKey) { state.selected.add(t.thread_id); return paintSelection(state); }
     navigate(threadHash(state.r, t.thread_id));
+  });
+  // Keyboard focus on a row makes it the current one (roving tabindex: one Tab stop for the list).
+  list.addEventListener('focusin', (e) => {
+    const row = e.target.closest('.row[data-tid]');
+    if (row && +row.dataset.i !== state.focus) setFocus(state, +row.dataset.i, false, false);
+  });
+  list.addEventListener('keydown', (e) => {
+    if (!e.target.matches('.row[data-tid]')) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setFocus(state, state.focus + (e.key === 'ArrowDown' ? 1 : -1), true, true); }
+    else if (e.key === ' ') { e.preventDefault(); listKeys(state, { key: 'x' }); }
   });
 }
 
@@ -334,10 +365,20 @@ async function emptyFolder(folder) {
   }
 }
 
-function setFocus(state, i, scroll) {
+function setFocus(state, i, scroll, moveDomFocus) {
   state.focus = Math.max(0, Math.min(i, state.items.length - 1));
-  $$('#list .row').forEach((r) => r.classList.toggle('focus', +r.dataset.i === state.focus));
-  if (scroll) $(`#list .row[data-i="${state.focus}"]`)?.scrollIntoView({ block: 'nearest' });
+  let target = null;
+  $$('#list .row[data-tid]').forEach((r) => {
+    const on = +r.dataset.i === state.focus;
+    r.classList.toggle('focus', on);
+    r.tabIndex = on ? 0 : -1;
+    if (on) target = r;
+  });
+  if (!target) return;
+  if (scroll) target.scrollIntoView({ block: 'nearest' });
+  // Follow with keyboard focus when the user is already navigating the list by keyboard.
+  const inList = document.activeElement?.closest?.('#list') || document.activeElement === document.body;
+  if (moveDomFocus ?? inList) target.focus({ preventScroll: true });
 }
 
 function listKeys(state, e) {
@@ -345,7 +386,7 @@ function listKeys(state, e) {
   const k = e.key;
   if (k === 'j') { setFocus(state, state.focus + 1, true); return true; }
   if (k === 'k') { setFocus(state, state.focus - 1, true); return true; }
-  if ((k === 'o' || k === 'Enter') && t) { navigate(threadHash(state.r, t.thread_id)); return true; }
+  if ((k === 'o' || (k === 'Enter' && (!e.target || e.target === document.body || e.target.matches?.('.row')))) && t) { navigate(threadHash(state.r, t.thread_id)); return true; }
   if (k === 'x' && t) { state.selected.has(t.thread_id) ? state.selected.delete(t.thread_id) : state.selected.add(t.thread_id); paintSelection(state); return true; }
   if (k === 's' && t) { toggleStar(state, t); return true; }
   const ids = state.selected.size ? [...state.selected] : t ? [t.thread_id] : [];
@@ -370,6 +411,7 @@ export function onRemoteChange(force) {
     else if (current.kind === 'thread') reloadThread(current, force);
     else if (current.kind === 'drafts') loadDrafts(current);
   }, force ? 0 : 150);
+  return current?.kind === 'list' || current?.kind === 'thread'; // these reloads return counts
 }
 
 // ---------------------------------------------------------------- thread
@@ -409,6 +451,7 @@ function reloadThread(state, force) {
   const before = state.messages.length;
   api(`/threads/${state.id}?context=${contextFolder(state.r)}&peek=1`, { background: true }).then((res) => {
     if (current !== state) return;
+    setCounts(res.counts);
     if (force || res.messages.length !== before) {
       const known = new Set(state.messages.map((m) => m.id));
       res.messages.forEach((m) => { if (!known.has(m.id)) state.open.add(m.id); });
@@ -538,7 +581,7 @@ function textBody(text) {
   }).join('\n');
   const main = fmt(lines.slice(0, cut)).replace(/\n+$/, '');
   const quoted = cut < lines.length ? fmt(lines.slice(cut)) : '';
-  return html`<pre class="mail-text">${raw(main)}</pre>${quoted ? html`<button class="icon-btn sm" data-showquote data-tip="Show trimmed content" aria-label="Show trimmed content">${icon('more_vert')}</button><pre class="mail-text" hidden>${raw(quoted)}</pre>` : ''}`;
+  return html`<pre class="mail-text" dir="auto">${raw(main)}</pre>${quoted ? html`<button class="icon-btn sm" data-showquote data-tip="Show trimmed content" aria-label="Show trimmed content">${icon('more_vert')}</button><pre class="mail-text" dir="auto" hidden>${raw(quoted)}</pre>` : ''}`;
 }
 
 function messageHTML(state, m, i) {
@@ -589,7 +632,7 @@ function paintThread(state) {
   const others = new Set();
   ms.forEach((m) => [m.from, ...(m.to || []), ...(m.cc || [])].forEach((a) => a?.email && a.email !== S.me.user.email && others.add(a.email)));
   setHTML(box, html`
-    <div class="thread-head"><h1>${subject}${folders.map((f) => html`<span class="pill gray">${folderName(f)}</span>`)}</h1></div>
+    <div class="thread-head"><h1 dir="auto">${subject}${folders.map((f) => html`<span class="pill gray">${folderName(f)}</span>`)}</h1></div>
     ${ms.map((m, i) => messageHTML(state, m, i))}
     <div class="reply-bar">
       <button class="btn outlined" data-bottom="reply">${icon('reply')}Reply</button>
@@ -664,11 +707,33 @@ function mountFrame(state, m) {
   const invert = document.documentElement.dataset.theme === 'dark' && !isRich(m.html);
   frame.classList.toggle('inverted', invert);
   const extra = invert ? 'body{background:#f0f0ef}img,video,picture{filter:invert(1) hue-rotate(180deg)}' : '';
-  frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><base target="_blank"><style>${FRAME_CSS}${extra}</style></head><body>${m.html}</body></html>`;
+  frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><base target="_blank"><style>${FRAME_CSS}${extra}</style></head><body${isRich(m.html) ? '' : ' dir="auto"'}>${m.html}</body></html>`;
   frame.onload = () => {
     const doc = frame.contentDocument;
     if (!doc) return;
-    const fit = () => { frame.style.height = Math.max(40, doc.documentElement.scrollHeight) + 'px'; };
+    let scale = 1;
+    const fit = () => {
+      const body = doc.body;
+      if (!body) return;
+      const avail = frame.clientWidth;
+      if (scale === 1 && avail > 0 && doc.documentElement.scrollWidth > avail + 4) {
+        // Fixed-width newsletters (e.g. 700px tables) on narrow screens: shrink to fit.
+        body.style.width = doc.documentElement.scrollWidth + 'px';
+        scale = avail / body.offsetWidth;
+        body.style.transformOrigin = '0 0';
+        body.style.transform = `scale(${scale})`;
+        // transform doesn't change layout size: hide the unscaled overflow so the frame has
+        // nothing to scroll (the frame itself is sized to the scaled height below).
+        doc.documentElement.style.overflow = 'hidden';
+      }
+      if (scale !== 1) {
+        // Pull the layout height in to the scaled height too, so there's no empty space below.
+        const mb = Math.floor((scale - 1) * body.offsetHeight);
+        if (body.style.marginBottom !== mb + 'px') body.style.marginBottom = mb + 'px';
+      }
+      const h = scale === 1 ? doc.documentElement.scrollHeight : Math.ceil(body.getBoundingClientRect().height) + 8;
+      frame.style.height = Math.max(40, h) + 'px';
+    };
     fit();
     try { new ResizeObserver(fit).observe(doc.body); } catch { /* old browsers */ }
     doc.querySelectorAll('img').forEach((img) => img.addEventListener('load', fit));
@@ -736,8 +801,9 @@ async function loadDrafts(state) {
     setHTML(list, html`<div class="empty">${icon('insert_drive_file')}<h3>No drafts</h3><p>Messages you're writing are saved here automatically.</p></div>`);
     return;
   }
-  setHTML(list, state.items.map((d) => html`<div class="row" data-did="${d.id}">
+  setHTML(list, state.items.map((d, i) => html`<div class="row" data-did="${d.id}" role="listitem" tabindex="${i === 0 ? 0 : -1}" aria-label="Draft${d.to ? ` to ${d.to}` : ''}, ${d.subject || 'no subject'}">
     <span class="cb-wrap"></span>
+    <span class="av-cell">${avatar(d.to || 'Draft', '')}</span>
     <span class="who"><span style="color:var(--danger)">Draft</span>${d.to ? html` · ${d.to}` : ''}</span>
     <span class="mid"><span class="subj">${d.subject || '(no subject)'}</span><span class="snip">${d.snippet ? html`<span class="dash"> &nbsp;–&nbsp; </span>${d.snippet}` : ''}</span></span>
     <span class="date">${shortDate(d.updated_at)}</span>

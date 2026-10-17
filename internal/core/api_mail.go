@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/net/idna"
 	"io"
 	"mime"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func pathInt(r *http.Request, name string) int64 {
@@ -59,8 +61,11 @@ func (a *App) handleThreads(w http.ResponseWriter, r *http.Request, u *User) {
 	limit := queryInt(r, "limit", 50, 1, 200)
 	offset := queryInt(r, "offset", 0, 0, 1<<30)
 	rows, total, err := a.ListThreads(u.ID, folder, r.URL.Query().Get("q"), offset, limit)
-	if err != nil {
+	if errors.Is(err, errUnknownFolder) {
 		httpError(w, http.StatusBadRequest, "Unknown folder")
+		return
+	} else if err != nil {
+		a.internalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": rows, "total": total, "offset": offset, "limit": limit, "counts": a.FolderCounts(u.ID)})
@@ -85,15 +90,20 @@ func (a *App) handleThreadAction(w http.ResponseWriter, r *http.Request, u *User
 		Threads []int64 `json:"threads"`
 		View    string  `json:"view"`
 		Action  string  `json:"action"`
+		IDs     []int64 `json:"ids"` // optional: only these messages (used by Undo)
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if err := a.ThreadAction(u.ID, in.Threads, in.View, in.Action); err != nil {
+	moved, err := a.ThreadActionIDs(u.ID, in.Threads, in.View, in.Action, in.IDs)
+	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "counts": a.FolderCounts(u.ID)})
+	if moved == nil {
+		moved = []int64{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ids": moved, "counts": a.FolderCounts(u.ID)})
 }
 
 func (a *App) handleFlag(w http.ResponseWriter, r *http.Request, u *User) {
@@ -277,12 +287,15 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request, u *User) {
 
 func (a *App) saveUpload(userID int64, name, ctype string, data []byte) (map[string]any, error) {
 	id := RandomHex(16)
-	name = filepath.Base(strings.TrimSpace(name))
+	name = filepath.Base(strings.TrimSpace(sanitizeHeaderValue(name)))
 	if name == "" || name == "." || name == "/" {
 		name = "attachment"
 	}
 	if len(name) > 200 {
-		name = name[len(name)-200:]
+		name = name[len(name)-200:] // keep the extension
+		for len(name) > 0 && !utf8.RuneStart(name[0]) {
+			name = name[1:] // don't start in the middle of a character
+		}
 	}
 	if ctype == "" {
 		ctype = mime.TypeByExtension(filepath.Ext(name))
@@ -480,10 +493,9 @@ func normalizeAddrs(list []Addr) ([]Addr, error) {
 		if err != nil || !strings.Contains(pa.Address, "@") {
 			return nil, fmt.Errorf("%q is not a valid email address", e)
 		}
-		addr := strings.ToLower(pa.Address)
-		_, dom, _ := SplitAddress(addr)
-		if !strings.Contains(dom, ".") {
-			return nil, fmt.Errorf("%q is not a valid email address", e)
+		addr, err := wireAddress(strings.ToLower(pa.Address))
+		if err != nil {
+			return nil, fmt.Errorf("%q %s", e, err.Error())
 		}
 		if seen[addr] {
 			continue
@@ -700,4 +712,36 @@ func (a *App) handleDirectory(w http.ResponseWriter, r *http.Request, u *User) {
 		gs = append(gs, group{al.Address, al.Name, al.Description, len(al.Members)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"people": out, "groups": gs})
+}
+
+// wireAddress checks that an address can be used as-is in SMTP and in headers: a plain
+// (dot-atom) local part and a domain with a dot. International domains (bølle.no) are
+// converted to their ASCII form (xn--blle-gra.no), which every mail server understands.
+func wireAddress(addr string) (string, error) {
+	local, dom, ok := SplitAddress(addr)
+	if !ok || !dotAtom(local) {
+		return "", errors.New("is not a valid email address")
+	}
+	ascii, err := idna.Lookup.ToASCII(dom)
+	if err != nil || !strings.Contains(ascii, ".") || !ValidDomainName(ascii) {
+		return "", errors.New("is not a valid email address")
+	}
+	return local + "@" + ascii, nil
+}
+
+// dotAtom reports whether s is an RFC 5322 dot-atom (no quoting needed).
+func dotAtom(s string) bool {
+	if s == "" || len(s) > 64 || s[0] == '.' || s[len(s)-1] == '.' || strings.Contains(s, "..") {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-/=?^_`{|}~.", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }

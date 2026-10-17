@@ -47,7 +47,13 @@ function renderOffline(e) {
   $('#retry').onclick = boot;
 }
 
-bus.on('unauthorized', () => { if (shellReady) { shellReady = false; closeEvents(); compose.closeAll(true); auth.renderLogin(root, boot); } });
+bus.on('unauthorized', () => {
+  if (!shellReady) return;
+  shellReady = false;
+  closeEvents();
+  compose.closeAll(true); // keeps an open message in this browser; offered back after sign-in
+  auth.renderLogin(root, boot, "You've been signed out. Sign in again to continue.");
+});
 bus.on('mustchange', () => boot());
 
 // ---------------------------------------------------------------- shell
@@ -96,7 +102,10 @@ function renderShell() {
 
   const app = $('#app');
   $('#menu-btn').onclick = () => {
-    if (matchMedia('(max-width: 900px)').matches) app.classList.toggle('drawer-open');
+    if (matchMedia('(max-width: 900px)').matches) {
+      app.classList.toggle('drawer-open');
+      if (app.classList.contains('drawer-open')) setTimeout(() => $('#drawer .nav-item.active, #compose-btn')?.focus({ preventScroll: true }), 50);
+    }
     else { app.classList.toggle('collapsed'); pref.set('drawer.collapsed', app.classList.contains('collapsed')); }
   };
   $('#drawer-scrim').onclick = () => app.classList.remove('drawer-open');
@@ -280,6 +289,7 @@ async function route() {
     $('#search-clear').hidden = !input.value;
   }
   renderNav();
+  $('#app').dataset.view = r.name;
   const mailRoute = r.name === 'list' || r.name === 'thread' || r.name === 'drafts';
   rail.hidden = !mailRoute;
   try {
@@ -323,7 +333,7 @@ async function renderRail() {
   const ppl = (S.directory?.people || []).filter((p) => p.email !== S.me.user.email).slice(0, 6);
   setHTML(rail, html`
     <div class="card">
-      <h3>Today <span class="pct">${pct}%</span></h3>
+      <h3>Today <span class="pct" data-tip="Share of today's mail you've read">${pct}% read</span></h3>
       <div class="progress"><i style="width:${pct}%"></i></div>
       <div class="stats3">
         <div><b>${s.today_received}</b><small>Received</small></div>
@@ -337,7 +347,7 @@ async function renderRail() {
       <div class="stats3">
         <div><b>${s.messages}</b><small>Messages</small></div>
         <div class="g"><b>${bytes(s.used).split(' ')[0]}</b><small>${bytes(s.used).split(' ')[1]} used</small></div>
-        <div class="r"><b>${quota ? bytes(Math.max(0, quota - s.used)).split(' ')[0] : '∞'}</b><small>${quota ? bytes(Math.max(0, quota - s.used)).split(' ')[1] + ' free' : 'No limit'}</small></div>
+        <div class="${quota ? 'r' : ''}"><b>${quota ? bytes(Math.max(0, quota - s.used)).split(' ')[0] : '∞'}</b><small>${quota ? bytes(Math.max(0, quota - s.used)).split(' ')[1] + ' free' : 'No limit'}</small></div>
       </div>
     </div>
     ${ppl.length ? html`<div class="card">
@@ -375,10 +385,10 @@ function connectEvents() {
 function closeEvents() { es?.close(); es = null; }
 
 const onSync = debounce(() => {
-  refreshCounts();
-  mail.onRemoteChange();
+  // list and conversation responses carry the folder counts; only fetch them separately otherwise
+  if (!mail.onRemoteChange()) refreshCounts();
   renderRailSoon();
-}, 300);
+}, 300, 1500);
 
 async function notifyNewMail(ev) {
   if (!pref.get('notify', false) || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -408,6 +418,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const app = $('#app');
+  if (e.key === 'Escape' && app?.classList.contains('drawer-open')) { app.classList.remove('drawer-open'); $('#menu-btn')?.focus(); return; }
   if (Date.now() - gPrefix < 1200) {
     gPrefix = 0;
     const go = { i: '#/inbox', s: '#/starred', t: '#/sent', d: '#/drafts', a: '#/all', p: '#/people' }[e.key];
