@@ -1,10 +1,3 @@
-# Skien Mails on the Skienlab server.
-# Copy to ~/docker/apps/mailserver/docker-compose.yml on the server. The GitHub Actions
-# workflow (.github/workflows/deploy.yml) builds the image, then pulls and restarts it here.
-#
-# Web app: Nginx Proxy Manager (on skiensuite-net) forwards mail.skienlab.com -> http://skienmail:8080
-# Mail:    ports 25/587/465 are published on the host (NPM only proxies HTTP).
-
 networks:
   skiensuite-net:
     name: skiensuite-net
