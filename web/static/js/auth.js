@@ -40,7 +40,7 @@ export async function renderLogin(root, done, notice = '') {
         </div>
       </form>
     </div>
-    <div class="auth-foot"><span>Skien Mails</span>${themeToggle()}</div>
+    <div class="auth-foot"><span class="copy">© 2026 Skien Software Labs</span>${themeToggle()}</div>
   </div></div>`);
   wireFoot(root);
   passwordToggle(root);
@@ -151,7 +151,7 @@ export function renderSetup(root, done) {
           </div>
         </form>
       </div>
-      <div class="auth-foot"><span>Skien Mails</span>${themeToggle()}</div>
+      <div class="auth-foot"><span class="copy">© 2026 Skien Software Labs</span>${themeToggle()}</div>
     </div></div>`);
     wireFoot(root);
     passwordToggle(root);
@@ -206,7 +206,7 @@ export function renderForceChange(root, me, done) {
         </div>
       </form>
     </div>
-    <div class="auth-foot"><span>${me.user.email}</span>${themeToggle()}</div>
+    <div class="auth-foot"><span>${me.user.email} · © 2026 Skien Software Labs</span>${themeToggle()}</div>
   </div></div>`);
   wireFoot(root);
   passwordToggle(root);

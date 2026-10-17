@@ -706,7 +706,9 @@ function mountFrame(state, m) {
   const csp = `default-src 'none'; img-src ${allowImages ? 'https: http: data:' : 'data:'} ${location.origin}; style-src 'unsafe-inline'; font-src data:; media-src 'none'`;
   const invert = document.documentElement.dataset.theme === 'dark' && !isRich(m.html);
   frame.classList.toggle('inverted', invert);
-  const extra = invert ? 'body{background:#f0f0ef}img,video,picture{filter:invert(1) hue-rotate(180deg)}' : '';
+  // Plain messages sit directly on the glass; rich (designed) mail keeps its own white paper.
+  const extra = invert ? 'body{background:transparent;color:#1f1f1f}img,video,picture{filter:invert(1) hue-rotate(180deg)}'
+    : isRich(m.html) ? '' : 'body{background:transparent;color:#161c33}a{color:#4453f2}';
   frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><base target="_blank"><style>${FRAME_CSS}${extra}</style></head><body${isRich(m.html) ? '' : ' dir="auto"'}>${m.html}</body></html>`;
   frame.onload = () => {
     const doc = frame.contentDocument;

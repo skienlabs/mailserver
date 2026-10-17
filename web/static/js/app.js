@@ -176,7 +176,8 @@ function renderFoot() {
   setHTML(foot, html`<div class="storage-mini">
       ${quota ? html`<div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>${bytes(u.used_bytes)} of ${bytes(quota)} used` : html`${bytes(u.used_bytes)} used`}
     </div>
-    <div class="desktop-only" style="margin-top:10px">Shortcuts: <b>c</b> compose · <b>/</b> search · <b>?</b> help</div>`);
+    <div class="desktop-only" style="margin-top:10px">Shortcuts: <b>c</b> compose · <b>/</b> search · <b>?</b> help</div>
+    <div class="copy">© 2026 Skien Software Labs</div>`);
 }
 
 bus.on('counts', () => { if (shellReady) { renderNav(); updateBadge(); } });
