@@ -49,7 +49,7 @@ One-time setup:
 2. **On the VM**, create the app folder and compose file:
    ```bash
    mkdir -p ~/docker/apps/mailserver
-   # copy deploy/docker-compose.yml from this repo to ~/docker/apps/mailserver/docker-compose.yml
+   # copy docker-compose.yml from this repo to ~/docker/apps/mailserver/docker-compose.yml
    sudo ss -ltnp | grep -E ':(25|465|587)\b'   # must print nothing: no other mail server on these ports
    ```
 3. **Firewall**: allow inbound TCP 25, 587 and 465 to the VM, in both the provider's firewall and `ufw` if it's enabled.
@@ -62,12 +62,17 @@ One-time setup:
 
 To roll back, change `:latest` in the VM's compose file to a previous commit tag (e.g. `:8f1877f`) and run `docker compose up -d`.
 
-### Option B: any server with Docker
+### Option B: build and run it anywhere (e.g. to try it locally)
+
+`docker-compose.yml` is the Skienlab server's file (pre-built image, `skiensuite-net`). To run your own build instead:
 
 ```bash
 git clone https://github.com/skienlabs/mailserver.git
 cd mailserver
-docker compose up -d --build
+docker build -t skienmail .
+docker run -d --name skienmail --restart unless-stopped \
+  -p 25:25 -p 587:587 -p 465:465 -p 8080:8080 \
+  -e SM_HOSTNAME=mail.example.com -v skienmail-data:/data skienmail
 docker logs skienmail 2>&1 | grep "setup code"
 ```
 
@@ -171,8 +176,8 @@ docker exec skienmail skienmail backup /data/backup-$(date +%F).db
 docker run --rm -v mailserver_skienmail-data:/data -v "$PWD":/out alpine \
   tar czf /out/skienmail-$(date +%F).tgz -C /data backup-$(date +%F).db mail avatars
 
-# Update to a new version (your data is in the volume and is kept)
-git pull && docker compose up -d --build
+# Update to a new version (your data is in the volume and is kept):
+# run the "Build & Deploy Skien Mails" workflow in GitHub Actions
 ```
 
 Check `docker volume ls` for the exact volume name. Restoring means stopping the container, putting `skienmail.db` (renamed from the backup), `mail/` and `avatars/` back into the volume, and starting it again.
