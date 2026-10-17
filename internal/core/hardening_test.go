@@ -53,7 +53,7 @@ func countFiles(t *testing.T, dir string) int {
 // Finding 1: deeply nested multipart must be cheap to handle and refused at SMTP.
 func TestMIMEBombIsCheapAndRefused(t *testing.T) {
 	var b strings.Builder
-	b.WriteString("From: x@example.org\r\nSubject: bomb\r\n")
+	b.WriteString("From: x@example.test\r\nSubject: bomb\r\n")
 	depth := 5000
 	for i := 0; i < depth; i++ {
 		fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=b%d\r\n\r\n--b%d\r\n", i, i)
@@ -74,13 +74,13 @@ func TestMIMEBombIsCheapAndRefused(t *testing.T) {
 		t.Fatalf("expected notice, got %q", body.Text)
 	}
 	// Normal mail with a few levels is not affected.
-	normal := []byte("From: x@example.org\r\nContent-Type: multipart/mixed; boundary=a\r\n\r\n--a\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n--a--\r\n")
+	normal := []byte("From: x@example.test\r\nContent-Type: multipart/mixed; boundary=a\r\n\r\n--a\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n--a--\r\n")
 	if MIMETooComplex(normal) || !strings.Contains(ParseBody(normal).Text, "hello") {
 		t.Fatal("normal message misclassified")
 	}
 
 	app, _, _, _ := newTestApp(t, true)
-	err := sendSMTP(app.Cfg.SMTPAddr, "x@example.org", []string{"asi@skien.test"}, raw)
+	err := sendSMTP(app.Cfg.SMTPAddr, "x@example.test", []string{"asi@skien.test"}, raw)
 	if err == nil || !strings.Contains(err.Error(), "552") {
 		t.Fatalf("expected 552 for MIME bomb, got %v", err)
 	}
@@ -89,7 +89,7 @@ func TestMIMEBombIsCheapAndRefused(t *testing.T) {
 // Finding 2: a repeated Message-ID must not leave orphan files or skew quota.
 func TestDuplicateDeliveryLeavesNoFiles(t *testing.T) {
 	app, _, a, _ := newTestApp(t, false)
-	raw := []byte("From: x@example.org\r\nTo: asi@skien.test\r\nSubject: dup\r\nMessage-ID: <same@x>\r\n\r\nbody\r\n")
+	raw := []byte("From: x@example.test\r\nTo: asi@skien.test\r\nSubject: dup\r\nMessage-ID: <same@x>\r\n\r\nbody\r\n")
 	for i := 0; i < 5; i++ {
 		if _, err := app.Deliver(a.ID, raw, DeliverOpts{}); err != nil {
 			t.Fatal(err)
@@ -107,7 +107,7 @@ func TestDuplicateDeliveryLeavesNoFiles(t *testing.T) {
 // Finding 3: Trash keeps the full retention window even for old mail.
 func TestTrashRetentionCountsFromDeletion(t *testing.T) {
 	app, _, a, _ := newTestApp(t, false)
-	raw := []byte("From: x@example.org\r\nTo: asi@skien.test\r\nSubject: old\r\nMessage-ID: <old@x>\r\n\r\nbody\r\n")
+	raw := []byte("From: x@example.test\r\nTo: asi@skien.test\r\nSubject: old\r\nMessage-ID: <old@x>\r\n\r\nbody\r\n")
 	id, _ := app.Deliver(a.ID, raw, DeliverOpts{})
 	old := time.Now().Add(-90 * 24 * time.Hour).UnixMilli()
 	app.DB.Exec(`UPDATE messages SET received_at=?, date=? WHERE id=?`, old, old, id)
@@ -242,8 +242,8 @@ func TestFullMailboxRefusedAtRcpt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	c.Hello("mx.example.org")
-	c.Mail("someone@example.org")
+	c.Hello("mx.example.test")
+	c.Mail("someone@example.test")
 	err = c.Rcpt("asi@skien.test")
 	if err == nil || !strings.Contains(err.Error(), "452") {
 		t.Fatalf("expected 452 at RCPT, got %v", err)

@@ -39,14 +39,37 @@ Email for your organisation, built from scratch: a complete mail server, webmail
 
 ## 2. Install
 
+### Option A: Skienlab server via GitHub Actions (how we deploy)
+
+This uses the same flow as the other Skienlab apps: **Actions → Build & Deploy Skien Mails → Run workflow**. It runs the tests, builds the image, pushes it to Artifact Registry (`test-images/mailserver`, tagged `latest` plus the commit SHA), then SSHes to the VM, pulls and restarts the container, and fails the run if the container doesn't report healthy.
+
+One-time setup:
+
+1. **Repository secrets** (*Settings → Secrets and variables → Actions*): `GCP_SA_KEY`, `GCP_PROJECT_ID`, `VM_HOST`, `VM_USER`, `VM_SSH_KEY`. Use the same values as the tasks repo, unless they're already organisation secrets.
+2. **On the VM**, create the app folder and compose file:
+   ```bash
+   mkdir -p ~/docker/apps/mailserver
+   # copy deploy/docker-compose.yml from this repo to ~/docker/apps/mailserver/docker-compose.yml
+   sudo ss -ltnp | grep -E ':(25|465|587)\b'   # must print nothing: no other mail server on these ports
+   ```
+3. **Firewall**: allow inbound TCP 25, 587 and 465 to the VM, in both the provider's firewall and `ufw` if it's enabled.
+4. Run the workflow, then get the setup code:
+   ```bash
+   docker logs skienmail 2>&1 | grep "setup code"
+   ```
+   (The workflow never prints this code, because this repo's Actions logs are public.)
+5. In Nginx Proxy Manager, add `mail.skienlab.com` → `http://skienmail:8080` (step 3 below). The container sits on `skiensuite-net` like the other apps, so there's no web port to publish.
+
+To roll back, change `:latest` in the VM's compose file to a previous commit tag (e.g. `:8f1877f`) and run `docker compose up -d`.
+
+### Option B: any server with Docker
+
 ```bash
 git clone https://github.com/skienlabs/mailserver.git
 cd mailserver
 docker compose up -d --build
 docker logs skienmail 2>&1 | grep "setup code"
 ```
-
-The CI workflow (`.github/workflows/build.yml`; if your copy has it at `docs/github-workflow-build.yml`, move it there first) runs the tests and publishes a ready image on every push to `main`. To use it, replace `build: .` in `docker-compose.yml` with `image: ghcr.io/skienlabs/mailserver:latest`.
 
 ## 3. HTTPS with Nginx Proxy Manager
 

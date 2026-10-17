@@ -21,7 +21,7 @@ func BenchmarkDeliver(b *testing.B) {
 		i := 0
 		for pb.Next() {
 			i++
-			raw := []byte(fmt.Sprintf("From: x <x@example.org>\r\nTo: a@skien.test\r\nSubject: s %d %d\r\nMessage-ID: <%d.%d@x>\r\n\r\nhello world body\r\n", i, time.Now().UnixNano(), i, time.Now().UnixNano()))
+			raw := []byte(fmt.Sprintf("From: x <x@example.test>\r\nTo: a@skien.test\r\nSubject: s %d %d\r\nMessage-ID: <%d.%d@x>\r\n\r\nhello world body\r\n", i, time.Now().UnixNano(), i, time.Now().UnixNano()))
 			if _, err := app.Deliver(u.ID, raw, DeliverOpts{}); err != nil {
 				b.Fatal(err)
 			}

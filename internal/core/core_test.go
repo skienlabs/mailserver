@@ -73,7 +73,7 @@ func sendSMTP(addr, from string, rcpts []string, msg []byte) error {
 		return err
 	}
 	defer c.Close()
-	if err := c.Hello("mx.example.org"); err != nil {
+	if err := c.Hello("mx.example.test"); err != nil {
 		return err
 	}
 	if err := c.StartTLS(&tls.Config{InsecureSkipVerify: true}); err != nil {
@@ -259,19 +259,19 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// Inbound SMTP from an outside sender
-	msg := "From: Ravi <ravi@example.org>\r\nTo: sajin@skien.test\r\nSubject: Quarterly invoice\r\nMessage-ID: <abc123@example.org>\r\n" +
+	msg := "From: Ravi <ravi@example.test>\r\nTo: sajin@skien.test\r\nSubject: Quarterly invoice\r\nMessage-ID: <abc123@example.test>\r\n" +
 		"Date: " + time.Now().Format(time.RFC1123Z) + "\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=XYZ\r\n\r\n" +
 		"--XYZ\r\nContent-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nPlease find the invoice attached. Caf=E9\r\n" +
 		"--XYZ\r\nContent-Type: application/pdf; name=\"invoice.pdf\"\r\nContent-Disposition: attachment; filename=\"invoice.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--XYZ--\r\n"
-	if err := sendSMTP(cfg.SMTPAddr, "ravi@example.org", []string{"sajin+billing@skien.test"}, []byte(msg)); err != nil {
+	if err := sendSMTP(cfg.SMTPAddr, "ravi@example.test", []string{"sajin+billing@skien.test"}, []byte(msg)); err != nil {
 		t.Fatalf("inbound smtp: %v", err)
 	}
 	// Relaying is refused on the MX port
-	if err := sendSMTP(cfg.SMTPAddr, "ravi@example.org", []string{"x@gmail.com"}, []byte(msg)); err == nil {
+	if err := sendSMTP(cfg.SMTPAddr, "ravi@example.test", []string{"x@gmail.com"}, []byte(msg)); err == nil {
 		t.Fatal("open relay!")
 	}
 	// Spoofing a local From without authentication is refused
-	spoof := strings.Replace(msg, "From: Ravi <ravi@example.org>", "From: Asi <asi@skien.test>", 1)
+	spoof := strings.Replace(msg, "From: Ravi <ravi@example.test>", "From: Asi <asi@skien.test>", 1)
 	if err := sendSMTP(cfg.SMTPAddr, "asi@skien.test", []string{"sajin@skien.test"}, []byte(spoof)); err == nil {
 		t.Fatal("spoofed local sender accepted")
 	}

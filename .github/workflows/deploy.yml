@@ -1,0 +1,96 @@
+name: Build & Deploy Skien Mails
+
+# Same flow as the other apps: test, build image, push to GAR, SSH to the VM, pull and restart.
+# Uses the same secrets: GCP_SA_KEY, GCP_PROJECT_ID, VM_HOST, VM_USER, VM_SSH_KEY.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deploys at once; a second one waits for the first.
+concurrency:
+  group: deploy-mailserver
+  cancel-in-progress: false
+
+env:
+  IMAGE: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/test-images/mailserver
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      # End-to-end tests: setup, users, SMTP in/out, threading, search, bounces, security checks
+      - name: Tests
+        run: go test ./... -count=1
+
+  build-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Authenticate to GCP
+      - name: Auth GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # Configure Docker
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      # Build image (the Go binary and web app are built inside Docker)
+      - name: Build image
+        run: |
+          docker build \
+            -t "$IMAGE:latest" \
+            -t "$IMAGE:${GITHUB_SHA::7}" \
+            .
+
+      # Push image (latest + commit sha, so you can roll back)
+      - name: Push image
+        run: |
+          docker push "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+
+      # Deploy to VM, then wait until the container reports healthy
+      - name: Deploy to VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: 2232
+          script: |
+            set -e
+            export PATH="$HOME/google-cloud-sdk/bin:$PATH"
+            cd ~/docker/apps/mailserver || { echo "Missing ~/docker/apps/mailserver/docker-compose.yml - copy deploy/docker-compose.yml from the repo first"; exit 1; }
+            docker compose pull
+            docker compose up -d
+            status=starting
+            for i in $(seq 1 45); do
+              status=$(docker inspect -f '{{.State.Health.Status}}' skienmail 2>/dev/null || echo starting)
+              [ "$status" = healthy ] && break
+              sleep 2
+            done
+            if [ "$status" != healthy ]; then
+              echo "Skien Mails did not become healthy (status: $status). Recent logs:"
+              docker logs --tail 80 skienmail 2>&1 | grep -vi "setup code"
+              exit 1
+            fi
+            echo "Skien Mails is up and healthy"
+            docker image prune -f
