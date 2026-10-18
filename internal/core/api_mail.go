@@ -128,7 +128,7 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	out := map[string]any{"used": u.UsedBytes, "quota": u.QuotaBytes}
 	var recv, read, sent, msgs int64
-	a.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(seen),0) FROM messages WHERE user_id=? AND folder IN ('inbox','archive') AND received_at >= ?`, u.ID, since).Scan(&recv, &read)
+	a.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(seen),0) FROM messages WHERE user_id=? AND folder NOT IN ('sent','trash','spam') AND received_at >= ?`, u.ID, since).Scan(&recv, &read)
 	a.DB.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id=? AND folder='sent' AND received_at >= ?`, u.ID, since).Scan(&sent)
 	a.DB.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id=?`, u.ID).Scan(&msgs)
 	out["today_received"], out["today_read"], out["today_unread"], out["today_sent"], out["messages"] = recv, read, recv-read, sent, msgs

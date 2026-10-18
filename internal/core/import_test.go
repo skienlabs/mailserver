@@ -157,7 +157,7 @@ func TestIMAPImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{"INBOX": "inbox", "Sent": "sent", "Projects/Alpha": "archive", "Spam": "skip", "Drafts": "skip"}
+	want := map[string]string{"INBOX": "inbox", "Sent": "sent", "Projects/Alpha": "keep", "Spam": "skip", "Drafts": "skip"}
 	for _, fo := range folders {
 		if w, ok := want[fo.Name]; ok && fo.Target != w {
 			t.Fatalf("%s suggested %s, want %s", fo.Name, fo.Target, w)
@@ -187,7 +187,14 @@ func TestIMAPImport(t *testing.T) {
 	check("Starred and read", "inbox", true, true)
 	check("Unread one", "inbox", false, false)
 	check("Re: Starred and read", "sent", true, false)
-	check("Alpha kickoff", "archive", false, false)
+	alpha, err := app.folderByName(a.ID, "Projects/Alpha")
+	if err != nil {
+		t.Fatalf("folder of the same name not created: %v", err)
+	}
+	if _, err := app.folderByName(a.ID, "Projects"); err != nil {
+		t.Fatal("parent folder not created")
+	}
+	check("Alpha kickoff", alpha.Key, false, false)
 	if _, ok := got["Win money"]; ok {
 		t.Fatal("skipped folder imported")
 	}
@@ -343,8 +350,9 @@ func TestMboxImportGmailLabels(t *testing.T) {
 	if m := got["Labelled sent"]; m.folder != "sent" || !m.seen {
 		t.Fatalf("sent: %+v", m)
 	}
-	if m := got["Custom label"]; m.folder != "archive" || !m.seen {
-		t.Fatalf("custom: %+v", m)
+	f, err := app.folderByName(a.ID, "Project, Alpha")
+	if m := got["Custom label"]; err != nil || m.folder != f.Key || !m.seen {
+		t.Fatalf("custom label: %+v (%v)", m, err)
 	}
 	var blob string
 	app.DB.QueryRow(`SELECT blob FROM messages WHERE user_id=? AND subject='Labelled inbox'`, a.ID).Scan(&blob)

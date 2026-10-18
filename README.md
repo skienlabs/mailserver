@@ -2,11 +2,11 @@
 
 Email for your organisation, built from scratch: a complete mail server, webmail and admin console in **one small Docker container**.
 
-- **Mail server**: receives mail on port 25, delivers outgoing mail itself (or through a relay), and lets apps send through ports 587/465.
+- **Mail server**: receives mail on port 25, delivers outgoing mail itself (or through a relay), lets apps send through ports 587/465, and lets Outlook, Apple Mail, Thunderbird and phone mail apps read mail over IMAP (993/143).
 - **Trusted mail**: every outgoing message is DKIM-signed. Incoming mail is checked with SPF, DKIM and DMARC, reverse DNS and blocklists. Spam goes to the Spam folder, and forged mail claiming to be from your own domain is rejected.
-- **Webmail**: a Material-style app with light and dark themes. It has conversations, search (`from:`, `has:attachment`, `is:unread`…), stars, archive, rich-text compose with attachments, drafts that save themselves, undo send, signatures, out-of-office replies, keyboard shortcuts and live updates.
+- **Webmail**: a Material-style app with light and dark themes. It has conversations, search (`from:`, `has:attachment`, `is:unread`…), stars, archive, your own folders, filters that sort new mail, blocked and always-allowed senders, rich-text compose with attachments, drafts that save themselves, undo send, signatures, out-of-office replies, keyboard shortcuts, live updates, mail import and a one-click mailbox export.
 - **Admin console**: users, groups (info@, team@ with "send as"), domains with DNS record checks, the delivery queue, an activity log, mail traffic and server settings.
-- **Installable app**: works on Windows, macOS, Android and iPhone, with an unread badge, new-mail notifications and `mailto:` handling.
+- **Installable app**: works on Windows, macOS, Android and iPhone, with an unread badge, `mailto:` handling and new-mail notifications, also while the app is closed (Web Push, end-to-end encrypted).
 - **Small and fast**: one Go binary with SQLite (WAL) and full-text search. It idles at about 30 MB of RAM, and the inbox loads in about 10 ms even under load.
 
 | Inbox (dark) | Inbox (light) |
@@ -18,7 +18,7 @@ Email for your organisation, built from scratch: a complete mail server, webmail
 ```
 ┌────────────────────────── skienmail container ──────────────────────────┐
 │  :25  inbound MX ──► SPF/DKIM/DMARC + spam score ──► mailbox (SQLite+.eml)  │
-│  :587/:465 submission (auth) ─┐                                           │
+│  :587/:465 submission (auth) ─┐   :993/:143 IMAP for mail apps ◄─ mailbox  │
 │  :8080 web app + JSON API ────┴─► local delivery / DKIM sign ─► queue ─► internet │
 │                                   retries for 4 days, bounces on failure   │
 │  /data  skienmail.db · mail/ · queue/ · uploads/ · avatars/ · certs/       │
@@ -35,6 +35,7 @@ Email for your organisation, built from scratch: a complete mail server, webmail
 | **Inbound port 25** open in your firewall or security group | To receive mail |
 | **Outbound port 25** allowed by your provider | To deliver mail directly. **Google Cloud, AWS and Azure block it.** On those, use a relay (step 6). After setup, *Admin console → Overview → Test port 25* tells you which case you're in. |
 | Ports 587 and 465 (optional) | Only for phones, printers or scripts that send mail through the server |
+| Ports 993 and 143 (optional) | Only for mail apps (Outlook, Apple Mail, Thunderbird, phone mail apps) that read mail over IMAP |
 | Reverse DNS (PTR) for the IP | Gmail and Outlook reject mail from IPs without it. You set it at your hosting provider. |
 
 ## 2. Install
@@ -50,9 +51,9 @@ One-time setup:
    ```bash
    mkdir -p ~/docker/apps/mailserver
    # copy docker-compose.yml from this repo to ~/docker/apps/mailserver/docker-compose.yml
-   sudo ss -ltnp | grep -E ':(25|465|587)\b'   # must print nothing: no other mail server on these ports
+   sudo ss -ltnp | grep -E ':(25|143|465|587|993)\b'   # must print nothing: no other mail server on these ports
    ```
-3. **Firewall**: allow inbound TCP 25, 587 and 465 to the VM, in both the provider's firewall and `ufw` if it's enabled.
+3. **Firewall**: allow inbound TCP 25, 587, 465, 993 and 143 to the VM, in both the provider's firewall and `ufw` if it's enabled (993 and 143 are only needed for mail apps).
 4. Run the workflow, then get the setup code:
    ```bash
    docker logs skienmail 2>&1 | grep "setup code"
@@ -71,7 +72,7 @@ git clone https://github.com/skienlabs/mailserver.git
 cd mailserver
 docker build -t skienmail .
 docker run -d --name skienmail --restart unless-stopped \
-  -p 25:25 -p 587:587 -p 465:465 -p 8080:8080 \
+  -p 25:25 -p 587:587 -p 465:465 -p 993:993 -p 143:143 -p 8080:8080 \
   -e SM_HOSTNAME=mail.example.com -v skienmail-data:/data skienmail
 docker logs skienmail 2>&1 | grep "setup code"
 ```
@@ -129,12 +130,30 @@ Each employee must choose their own password the first time they sign in. After 
 
 ### Bringing over old mail (Zoho, Gmail, others)
 
-Each person can import their old mail in **Settings → Import mail**. Their old account isn't changed.
+Each person can import their old mail in **Settings → Import & export**. Their old account isn't changed.
 
 - **From the old account (recommended for Zoho).** Pick the provider (Zoho company domain or @zohomail, data centre India / US / Europe, Gmail, Yahoo or any IMAP server), sign in, choose where each folder goes, and start. Folders, read status, stars and original dates are kept. In Zoho, first turn on *Settings → Mail Accounts → IMAP Access*. If the account uses two-step verification, use an app-specific password. The password is used only for that import and isn't stored.
 - **From a file.** Upload a Zoho export (*Zoho Mail → Settings → Import/Export → Export*, a `.zip` of `.eml` files), a Google Takeout or Thunderbird `.mbox`, or a single `.eml`. Large files are uploaded in parts and resume after a dropped connection; up to 20 GB per file.
 
 Imports run in the background. Running one again is safe because messages already in the mailbox are skipped. Imported mail counts toward the mailbox size limit; an import stops cleanly when the mailbox is full.
+
+**Export.** In the same tab, *Export your mail* downloads a `.zip` with one folder per mail folder and one `.eml` file per message (plus a `messages.csv` index). Outlook, Apple Mail and Thunderbird open `.eml` files, and the `.zip` can be imported back here or into another service.
+
+### Folders, filters and blocked senders
+
+In **Settings → Filters & blocked** (or from the side menu and a message's ⋮ menu):
+
+- **Folders**: create, rename (use `/` for subfolders, e.g. `Clients/Acme`) and delete. Deleting a folder moves its mail to Archive. Move conversations with **Move to** or the `v` key.
+- **Filters**: sort new mail as it arrives by sender, recipient, subject or words, then move it to a folder, mark it read or star it. All conditions must match; within one condition, commas mean "or". Filters run top to bottom, and the first one that moves a message decides its folder. A new filter can also be applied to mail you already have (Inbox, Archive and your own folders).
+- **Blocked senders** go straight to Spam; **always allowed** senders skip the spam filter when the message is verified as really coming from their domain (SPF or DKIM), so forged copies still go to Spam. Both accept an address or a whole domain.
+
+### Mail apps (Outlook, Apple Mail, Thunderbird, phones)
+
+Each person finds their settings in **Settings → Email apps**: server `mail.skienlab.com`, IMAP on 993 (SSL/TLS) or 143 (STARTTLS), SMTP on 465 (SSL/TLS) or 587 (STARTTLS), username = email address, password = their Skien Mails password. Folders, read status, stars and moves stay in sync with the web app. Deleting in a mail app moves mail to Trash. Mail apps need a real TLS certificate (step 7), so set that up before announcing it.
+
+### Notifications when the app is closed
+
+In **Settings → General → Notifications**, each person turns on *When Skien Mails is closed* on every phone or computer they want notified. It works in Chrome, Edge and Firefox on Windows, macOS, Linux and Android, in Safari on macOS, and on iPhone and iPad once Skien Mails has been added to the Home Screen. A burst of mail becomes one notification, nothing is sent for mail that's already read or goes to Spam, and *Show sender and subject* can be turned off for shared screens. Notifications stop on a device when someone signs out there, and changing the password stops them on every other device. The notification content is encrypted for that device only; the browser's push service (Google, Mozilla, Apple, Microsoft) can't read it. The server needs outbound HTTPS to those services.
 
 ### Installing the app on Windows
 
@@ -144,9 +163,9 @@ Open `https://mail.skienlab.com` in Edge or Chrome and click **Install** (the ic
 
 Go to *Admin console → Server settings → Outgoing relay*. Enter your relay provider's host, port, username and password: for example Amazon SES (`email-smtp.ap-south-1.amazonaws.com:587`), Brevo (`smtp-relay.brevo.com:587`) or Mailgun. Then add the provider's `include:` to your SPF record, e.g. `v=spf1 mx include:amazonses.com -all`.
 
-## 7. TLS certificate for SMTP
+## 7. TLS certificate for SMTP and IMAP
 
-Mail between servers is always encrypted with STARTTLS. Without configuration the server uses a self-signed certificate, which other mail servers accept. Phones and desktop mail apps connecting on 587/465 need a real certificate, so reuse the one Nginx Proxy Manager already renews:
+Mail between servers is always encrypted with STARTTLS. Without configuration the server uses a self-signed certificate, which other mail servers accept. Phones and desktop mail apps connecting on 587/465 (sending) and 993/143 (reading) need a real certificate, so reuse the one Nginx Proxy Manager already renews:
 
 ```yaml
     environment:
@@ -167,7 +186,8 @@ Renewed certificates are picked up automatically within a minute. If Nginx Proxy
 | `SM_HOSTNAME` | (from setup) | Public name of the server. Overrides the setting in the console. |
 | `SM_HTTP_ADDR` | `:8080` | Web app listener (`off` to disable) |
 | `SM_SMTP_ADDR` / `SM_SUBMISSION_ADDR` / `SM_SUBMISSIONS_ADDR` | `:25` / `:587` / `:465` | SMTP listeners (`off` to disable) |
-| `SM_TLS_CERT`, `SM_TLS_KEY` | | PEM certificate and key for SMTP TLS |
+| `SM_IMAPS_ADDR` / `SM_IMAP_ADDR` | `:993` / `:143` | IMAP listeners for mail apps, TLS / STARTTLS (`off` to disable). If a port can't be opened the error is logged and everything else keeps running. |
+| `SM_TLS_CERT`, `SM_TLS_KEY` | | PEM certificate and key for SMTP and IMAP TLS |
 | `SM_ACME`, `SM_ACME_EMAIL` | `false` | Built-in Let's Encrypt (serves HTTPS on `:443` itself) |
 | `SM_TRUST_PROXY` | `true` | Trust `X-Forwarded-*` headers from private-network proxies |
 | `SM_SETUP_TOKEN` | random | Fixed setup code, if you prefer |
@@ -200,13 +220,15 @@ Check `docker volume ls` for the exact volume name. Restoring means stopping the
 - The API requires a custom header and a same-origin check (CSRF protection), and the web app runs under a strict Content-Security-Policy.
 - HTML email is sanitised on the server and shown in a sandboxed frame with its own CSP. Scripts never run, and remote images (trackers) stay blocked until you choose **Show images**.
 - The server is never an open relay: port 25 only accepts mail for your domains, and submission requires authentication and only lets you send as yourself or as groups you're allowed to use.
+- IMAP sign-in uses the same password and failed-attempt limits as the web app (a mail app retrying an old password counts once, so it can't lock others at that address out), needs TLS, and has per-address, per-account and total connection limits. Connections that haven't signed in are limited to a few per address and cut off after a minute. A password change or disabled account ends mail-app sessions within a minute.
+- New-mail notifications are encrypted end-to-end for each device (RFC 8291) and signed with the server's own key (VAPID). The server only sends them to the browsers' known push services, never to other addresses.
 - The container runs as an unprivileged user (except when you opt into reading root-owned certificates).
 
 ## Development
 
 ```bash
 go test ./...                       # end-to-end tests: setup, users, SMTP in/out, threading, search, bounces…
-SM_DATA_DIR=./data SM_SMTP_ADDR=:2525 SM_SUBMISSION_ADDR=:2587 SM_SUBMISSIONS_ADDR=:2465 go run ./cmd/skienmail
+SM_DATA_DIR=./data SM_SMTP_ADDR=:2525 SM_SUBMISSION_ADDR=:2587 SM_SUBMISSIONS_ADDR=:2465 SM_IMAP_ADDR=:2143 SM_IMAPS_ADDR=:2993 go run ./cmd/skienmail
 ```
 
 The frontend is plain ES modules in `web/static`, with no build step, embedded into the binary. `tools/gen_icons.py` and `tools/gen_logo.py` regenerate the icon sprite and app icons.

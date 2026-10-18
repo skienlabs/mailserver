@@ -17,6 +17,8 @@ type Config struct {
 	SMTPAddr        string // inbound MX, e.g. ":25"
 	SubmissionAddr  string // STARTTLS submission, e.g. ":587"
 	SubmissionsAddr string // implicit TLS submission, e.g. ":465"
+	IMAPAddr        string // mail apps, STARTTLS, e.g. ":143"
+	IMAPSAddr       string // mail apps, implicit TLS, e.g. ":993"
 
 	Hostname string // overrides the hostname stored in settings (EHLO / banner / TLS name)
 
@@ -66,6 +68,8 @@ func LoadConfig() *Config {
 		SMTPAddr:        env("SM_SMTP_ADDR", ":25"),
 		SubmissionAddr:  env("SM_SUBMISSION_ADDR", ":587"),
 		SubmissionsAddr: env("SM_SUBMISSIONS_ADDR", ":465"),
+		IMAPAddr:        env("SM_IMAP_ADDR", ":143"),
+		IMAPSAddr:       env("SM_IMAPS_ADDR", ":993"),
 		Hostname:        strings.ToLower(env("SM_HOSTNAME", "")),
 		TLSCertFile:     env("SM_TLS_CERT", ""),
 		TLSKeyFile:      env("SM_TLS_KEY", ""),

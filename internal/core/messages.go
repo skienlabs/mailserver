@@ -30,6 +30,10 @@ type DeliverOpts struct {
 	Flagged      bool  // starred on arrival (imports)
 	ReceivedAt   int64 // ms; 0 = now (imports keep the original date)
 	Quiet        bool  // don't publish a sync event (imports publish in batches)
+	// AllowDuplicate stores the message even if one with the same Message-ID exists (an
+	// explicit copy from a mail app must never be dropped as a duplicate).
+	AllowDuplicate bool
+	Answered       bool
 }
 
 func (a *App) blobPath(rel string) string { return filepath.Join(a.Cfg.DataDir, "mail", rel) }
@@ -106,8 +110,10 @@ func (a *App) Deliver(userID int64, raw []byte, o DeliverOpts) (int64, error) {
 			return 0, ErrQuota
 		}
 	}
-	if dup := a.duplicateOf(userID, m, o.Folder); dup > 0 {
-		return dup, nil // already delivered (e.g. a sender retry): store nothing
+	if !o.AllowDuplicate {
+		if dup := a.duplicateOf(userID, m, o.Folder); dup > 0 {
+			return dup, nil // already delivered (e.g. a sender retry): store nothing
+		}
 	}
 	rel := filepath.Join(fmt.Sprint(userID), time.Now().Format("200601"), RandomHex(12)+".eml")
 	if err := writeFileSync(a.blobPath(rel), raw); err != nil {
@@ -126,6 +132,9 @@ func (a *App) Deliver(userID int64, raw []byte, o DeliverOpts) (int64, error) {
 		// caller publishes
 	} else if o.Notify {
 		a.Events.Publish(userID, Event{Type: "mail", Folder: o.Folder, From: firstNonEmpty(m.From.Name, m.From.Email), Subject: m.Subject})
+		if o.Folder == "inbox" && !o.Seen {
+			a.push.newMail(userID, id, firstNonEmpty(m.From.Name, m.From.Email), m.Subject)
+		}
 	} else {
 		a.Events.Publish(userID, Event{Type: "sync", Folder: o.Folder})
 	}
@@ -160,7 +169,7 @@ func (a *App) duplicateOf(userID int64, m *Meta, folder string) int64 {
 		return 0
 	}
 	var dup int64
-	a.DB.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder<>'sent' AND NOT (folder IN ('trash','spam') AND prev_folder='sent') LIMIT 1`, userID, m.MessageID).Scan(&dup)
+	a.DB.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder<>'sent' AND prev_folder<>'sent' LIMIT 1`, userID, m.MessageID).Scan(&dup)
 	return dup
 }
 
@@ -201,9 +210,9 @@ func (a *App) insertMessage(userID int64, rel string, size int64, m *Meta, o Del
 	defer tx.Rollback()
 
 	// Duplicate suppression: the same Message-ID received twice (Sent copies don't count).
-	if m.MessageID != "" && o.Folder != "sent" {
+	if m.MessageID != "" && o.Folder != "sent" && !o.AllowDuplicate {
 		var dup int64
-		if err := tx.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder<>'sent' AND NOT (folder IN ('trash','spam') AND prev_folder='sent') LIMIT 1`, userID, m.MessageID).Scan(&dup); err == nil {
+		if err := tx.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND folder<>'sent' AND prev_folder<>'sent' LIMIT 1`, userID, m.MessageID).Scan(&dup); err == nil {
 			return dup, errDuplicate
 		}
 	}
@@ -278,11 +287,11 @@ func (a *App) insertMessage(userID int64, rel string, size int64, m *Meta, o Del
 		received = o.ReceivedAt
 	}
 	res, err := tx.Exec(`INSERT INTO messages(user_id, folder, thread_id, message_id, in_reply_to, refs, from_addr, from_name, to_json, cc_json, bcc_json,
-		reply_to, subject, snippet, date, received_at, size, has_attach, seen, flagged, spam_score, auth_summary, blob, trashed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		reply_to, subject, snippet, date, received_at, size, has_attach, seen, flagged, answered, spam_score, auth_summary, blob, trashed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		userID, o.Folder, thread, m.MessageID, m.InReplyTo, strings.Join(m.Refs, " "), m.From.Email, m.From.Name,
 		addrsJSON(m.To), addrsJSON(m.Cc), addrsJSON(o.Bcc), m.ReplyTo, m.Subject, snippet, m.Date.UnixMilli(), received, size,
-		m.HasAttach, o.Seen, o.Flagged, o.SpamScore, o.AuthSummary, rel, trashedAt(o.Folder, now))
+		m.HasAttach, o.Seen, o.Flagged, o.Answered, o.SpamScore, o.AuthSummary, rel, trashedAt(o.Folder, now))
 	if err != nil {
 		return 0, err
 	}
@@ -386,7 +395,7 @@ func folderCond(folder string) (string, []any, error) {
 	case "all":
 		return `folder NOT IN ('trash','spam')`, nil, nil
 	}
-	if realFolders[folder] {
+	if realFolders[folder] || isCustomFolder(folder) {
 		return `folder=?`, []any{folder}, nil
 	}
 	return "", nil, errUnknownFolder
@@ -422,7 +431,7 @@ func searchCond(q string) (string, []any) {
 			v = strings.ToLower(v)
 			if v == "anywhere" {
 				inFolder = "*"
-			} else if realFolders[v] {
+			} else if realFolders[v] || isCustomFolder(v) {
 				inFolder = v
 			}
 		case "is":
@@ -571,7 +580,8 @@ func (a *App) ListThreads(userID int64, folder, query string, offset, limit int)
 			// merge three sorted index ranges instead of de-duplicating ~all rows in a temp B-tree
 			countQ = `SELECT COUNT(*) FROM (SELECT thread_id FROM messages WHERE user_id=?1 AND folder='inbox'
 				UNION SELECT thread_id FROM messages WHERE user_id=?1 AND folder='archive'
-				UNION SELECT thread_id FROM messages WHERE user_id=?1 AND folder='sent')`
+				UNION SELECT thread_id FROM messages WHERE user_id=?1 AND folder='sent'
+				UNION SELECT thread_id FROM messages WHERE user_id=?1 AND folder >= 'f:' AND folder < 'f;')`
 		}
 		if err := a.DB.QueryRow(countQ, wargs...).Scan(&total); err != nil {
 			return nil, 0, err
@@ -893,16 +903,37 @@ func (a *App) ThreadActionIDs(userID int64, threadIDs []int64, view, action stri
 	case "unstar":
 		err = exec(`UPDATE messages SET flagged=0 WHERE `+base, bargs...)
 	case "archive":
-		err = move(`UPDATE messages SET folder='archive' WHERE `+base+` AND folder='inbox'`, bargs...)
+		if isCustomFolder(view) {
+			// From one of your folders: its messages remember where they came from (for Undo),
+			// and the conversation's Inbox messages are archived too.
+			err = move(`UPDATE messages SET folder='archive', prev_folder = CASE WHEN prev_folder='sent' THEN 'sent' ELSE ? END
+				WHERE `+base+` AND folder=?`, append(append([]any{view}, bargs...), view)...)
+			if err == nil {
+				err = move(`UPDATE messages SET folder='archive' WHERE `+base+` AND folder='inbox'`, bargs...)
+			}
+		} else {
+			err = move(`UPDATE messages SET folder='archive' WHERE `+base+` AND folder='inbox'`, bargs...)
+		}
+	case "unarchive":
+		// Undo of Archive: each message goes back to the folder it was archived from (Inbox
+		// unless it came from one of your folders).
+		if view != "archive" {
+			return nil, errors.New("unknown action")
+		}
+		err = move(`UPDATE messages SET folder = CASE
+				WHEN prev_folder IN (SELECT 'f:' || id FROM user_folders WHERE user_id=?) THEN prev_folder
+				WHEN prev_folder='sent' THEN 'sent'
+				ELSE 'inbox' END, prev_folder = CASE WHEN prev_folder='sent' THEN 'sent' ELSE '' END
+			WHERE `+inScope, append([]any{userID}, iargs...)...)
 	case "inbox":
 		// Restore: messages go back where they came from (sent stays sent).
 		// From Trash, messages return to the folder they were deleted from.
 		err = move(`UPDATE messages SET folder = CASE
-				WHEN folder='trash' AND prev_folder IN ('inbox','archive','sent') THEN prev_folder
+				WHEN folder='trash' AND (prev_folder IN ('inbox','archive','sent') OR prev_folder IN (SELECT 'f:' || id FROM user_folders WHERE user_id=?)) THEN prev_folder
 				WHEN prev_folder='sent' THEN 'sent'
 				WHEN folder='trash' AND prev_folder='' AND from_addr IN (SELECT email FROM users WHERE id=?) THEN 'sent'
 				ELSE 'inbox' END, prev_folder='', trashed_at=0
-			WHERE `+inScope, append([]any{userID}, iargs...)...)
+			WHERE `+inScope, append([]any{userID, userID}, iargs...)...)
 	case "trash":
 		err = move(`UPDATE messages SET prev_folder=folder, folder='trash', trashed_at=? WHERE `+inScope+` AND folder <> 'trash'`, append([]any{nowMs()}, iargs...)...)
 	case "spam":
@@ -913,7 +944,14 @@ func (a *App) ThreadActionIDs(userID int64, threadIDs []int64, view, action stri
 		}
 		err = a.deleteMessages(`SELECT id, size, blob FROM messages WHERE `+inScope, iargs...)
 	default:
-		return nil, errors.New("unknown action")
+		target, isMove := strings.CutPrefix(action, "move:")
+		if !isMove || !a.validMoveTarget(userID, target) {
+			return nil, errors.New("unknown action")
+		}
+		// Sent mail filed into a folder stays recognisable as sent (prev_folder) so a later
+		// "Move to Inbox" puts it back in Sent.
+		err = move(`UPDATE messages SET prev_folder = CASE WHEN folder='sent' OR prev_folder='sent' THEN 'sent' ELSE '' END,
+			folder=?, trashed_at=0 WHERE `+inScope+` AND folder <> ?`, append(append([]any{target}, iargs...), target)...)
 	}
 	if err != nil {
 		return nil, err
@@ -957,6 +995,7 @@ func (a *App) deleteMessages(q string, args ...any) error {
 		return err
 	}
 	defer tx.Rollback()
+	owners := map[int64]bool{}
 	for _, v := range vs {
 		var uid int64
 		if err := tx.QueryRow(`DELETE FROM messages WHERE id=? RETURNING user_id`, v.id).Scan(&uid); err != nil {
@@ -965,6 +1004,7 @@ func (a *App) deleteMessages(q string, args ...any) error {
 			}
 			return err
 		}
+		owners[uid] = true
 		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE rowid=?`, v.id); err != nil {
 			return err
 		}
@@ -977,6 +1017,9 @@ func (a *App) deleteMessages(q string, args ...any) error {
 	}
 	for _, v := range vs {
 		os.Remove(a.blobPath(v.blob))
+	}
+	for uid := range owners { // e.g. Trash emptied by the janitor: open apps refresh
+		a.Events.Publish(uid, Event{Type: "sync"})
 	}
 	return nil
 }

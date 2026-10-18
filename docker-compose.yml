@@ -14,12 +14,15 @@ services:
       - "25:25"     # inbound mail from the internet (MX)
       - "587:587"   # submission (STARTTLS) for mail apps, printers, scripts
       - "465:465"   # submission (implicit TLS)
+      - "993:993"   # IMAP (implicit TLS) for Outlook, Apple Mail, Thunderbird, phones
+      - "143:143"   # IMAP (STARTTLS)
     environment:
       TZ: Asia/Kolkata
       SM_HOSTNAME: mail.skienlab.com
-      # Optional: real TLS certificate for SMTP, reusing Nginx Proxy Manager's Let's Encrypt
-      # certificate for mail.skienlab.com (npm-N = the certificate's ID in NPM). Without this a
-      # self-signed certificate is used, which other mail servers accept.
+      # Recommended: real TLS certificate for SMTP and IMAP, reusing Nginx Proxy Manager's Let's
+      # Encrypt certificate for mail.skienlab.com (npm-N = the certificate's ID in NPM). Without
+      # this a self-signed certificate is used: other mail servers accept it, but mail apps
+      # (Outlook, Apple Mail, phones) warn or refuse to connect over IMAP.
       # SM_TLS_CERT: /certs/live/npm-N/fullchain.pem
       # SM_TLS_KEY: /certs/live/npm-N/privkey.pem
     # user: "0:0"   # needed together with the certificate mount (Let's Encrypt keys are root-only)

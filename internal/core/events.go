@@ -18,9 +18,17 @@ type Event struct {
 type Hub struct {
 	mu   sync.Mutex
 	subs map[int64]map[chan Event]struct{}
+	gens map[int64]uint64 // per user: bumped on every published change (mail apps resync when it moves)
 }
 
-func NewHub() *Hub { return &Hub{subs: map[int64]map[chan Event]struct{}{}} }
+func NewHub() *Hub { return &Hub{subs: map[int64]map[chan Event]struct{}{}, gens: map[int64]uint64{}} }
+
+// Gen returns a number that changes whenever something changed in the user's mailbox.
+func (h *Hub) Gen(userID int64) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.gens[userID]
+}
 
 func (h *Hub) Subscribe(userID int64) chan Event {
 	ch := make(chan Event, 32)
@@ -46,6 +54,7 @@ func (h *Hub) Unsubscribe(userID int64, ch chan Event) {
 func (h *Hub) Publish(userID int64, ev Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.gens[userID]++
 	for ch := range h.subs[userID] {
 		select {
 		case ch <- ev:

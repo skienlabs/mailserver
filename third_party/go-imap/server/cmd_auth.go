@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-imap/backend"
@@ -30,6 +31,7 @@ func (cmd *Select) Handle(conn Conn) error {
 	// 		fails is attempted, no mailbox is selected.
 	// For example, some clients (e.g. Apple Mail) perform SELECT "" when the
 	// server doesn't announce the UNSELECT capability.
+	unbindMailbox(ctx.Mailbox) // Skien Mails patch: the old mailbox is no longer selected
 	ctx.Mailbox = nil
 	ctx.MailboxReadOnly = false
 
@@ -46,6 +48,12 @@ func (cmd *Select) Handle(conn Conn) error {
 		imap.StatusUidNext, imap.StatusUidValidity,
 	}
 
+	// Skien Mails patch: let the mailbox send its own untagged updates (EXPUNGE after MOVE,
+	// changes found by NOOP/IDLE) to this connection, in order, before the tagged reply.
+	if b, ok := mbox.(backend.ResponseWriterBinder); ok {
+		b.BindResponseWriter(conn.WriteResp)
+	}
+
 	status, err := mbox.Status(items)
 	if err != nil {
 		return err
@@ -53,6 +61,9 @@ func (cmd *Select) Handle(conn Conn) error {
 
 	ctx.Mailbox = mbox
 	ctx.MailboxReadOnly = cmd.ReadOnly || status.ReadOnly
+	if ro, ok := mbox.(backend.ReadOnlySetter); ok {
+		ro.SetReadOnly(ctx.MailboxReadOnly)
+	}
 
 	res := &responses.Select{Mailbox: status}
 	if err := conn.WriteResp(res); err != nil {
@@ -295,9 +306,17 @@ func (cmd *Unselect) Handle(conn Conn) error {
 		return ErrNoMailboxSelected
 	}
 
+	unbindMailbox(ctx.Mailbox)
 	ctx.Mailbox = nil
 	ctx.MailboxReadOnly = false
 	return nil
+}
+
+// unbindMailbox tells a mailbox it's no longer selected on this connection (Skien Mails patch).
+func unbindMailbox(mbox backend.Mailbox) {
+	if b, ok := mbox.(backend.ResponseWriterBinder); ok {
+		b.BindResponseWriter(nil)
+	}
 }
 
 type Idle struct {
@@ -311,14 +330,62 @@ func (cmd *Idle) Handle(conn Conn) error {
 	}
 
 	// Wait for DONE
-	scanner := bufio.NewScanner(conn)
-	scanner.Scan()
-	if err := scanner.Err(); err != nil {
-		return err
-	}
+	done := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(conn)
+		scanner.Scan()
+		if err := scanner.Err(); err != nil {
+			done <- err
+			return
+		}
+		if strings.ToUpper(scanner.Text()) != "DONE" {
+			done <- errors.New("Expected DONE")
+			return
+		}
+		done <- nil
+	}()
 
-	if strings.ToUpper(scanner.Text()) != "DONE" {
-		return errors.New("Expected DONE")
+	// Skien Mails patch: while idling, look for changes in the selected mailbox — right away
+	// when the backend signals one, and at a slow interval otherwise.
+	ctx := conn.Context()
+	var wake <-chan struct{}
+	if n, ok := ctx.Mailbox.(backend.IdleNotifier); ok {
+		ch, stop := n.IdleNotify()
+		defer stop()
+		wake = ch
 	}
-	return nil
+	every := conn.Server().IdlePoll
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	// A failed poll is retried later: returning early would leave the goroutine above reading
+	// the connection while the server reads the next command. The exception is a session that
+	// has ended (password changed, account disabled): say BYE and disconnect.
+	poll := func() bool {
+		if p, ok := ctx.Mailbox.(backend.MailboxPoller); ok && ctx.Mailbox != nil {
+			if err := p.Poll(); errors.Is(err, backend.ErrSessionEnded) {
+				return false
+			}
+		}
+		return true
+	}
+	for {
+		var alive bool
+		select {
+		case err := <-done:
+			return err
+		case <-wake:
+			alive = poll()
+		case <-tick.C:
+			alive = poll()
+		}
+		if !alive {
+			conn.WriteResp(&imap.StatusResp{Type: imap.StatusRespBye, Info: "This session has ended. Sign in again."})
+			conn.Close()
+			<-done // the reader stops once the connection is closed
+			return backend.ErrSessionEnded
+		}
+	}
 }

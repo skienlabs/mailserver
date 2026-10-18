@@ -135,6 +135,11 @@ func trimSuffix(str string, suffix rune) string {
 type Reader struct {
 	MaxLiteralSize uint32 // The maximum literal size.
 
+	// Skien Mails patch: ReserveLiteral, when set, is called before a literal is read (and
+	// before the server asks for it). An error refuses it: as a parse error (BAD) when the
+	// client is waiting for permission, as a connection error when it is already sending.
+	ReserveLiteral func(n uint32) error
+
 	// Skien Mails patch: limits on what one response may contain, so a hostile peer can't
 	// make the parser use far more memory than it sent (see PATCHES.md). Zero = no limit.
 	MaxFields  int // fields (including nested ones) in one response or command line
@@ -236,6 +241,8 @@ func (r *Reader) ReadAtom() (interface{}, error) {
 	return atom, nil
 }
 
+var errLiteralTooBigNonSync = errors.New("imap: literal exceeding maximum size sent without waiting")
+
 func (r *Reader) ReadLiteral() (Literal, error) {
 	char, _, err := r.ReadRune()
 	if err != nil {
@@ -259,12 +266,26 @@ func (r *Reader) ReadLiteral() (Literal, error) {
 	if err != nil {
 		return nil, newParseError("cannot parse literal length: " + err.Error())
 	}
-	if r.MaxLiteralSize > 0 && uint32(n) > r.MaxLiteralSize {
-		return nil, newParseError("literal exceeding maximum size")
-	}
-
+	// Skien Mails patch: the line ends here; read its CRLF before any refusal below, or it would
+	// be taken for an empty command afterwards.
 	if err := r.ReadCrlf(); err != nil {
 		return nil, err
+	}
+	if r.MaxLiteralSize > 0 && uint32(n) > r.MaxLiteralSize {
+		if nonSync {
+			// Skien Mails patch: the data is already on its way and would otherwise be read as
+			// commands; the only safe answer is to end the connection.
+			return nil, errLiteralTooBigNonSync
+		}
+		return nil, newParseError("literal exceeding maximum size")
+	}
+	if r.ReserveLiteral != nil {
+		if err := r.ReserveLiteral(uint32(n)); err != nil {
+			if nonSync {
+				return nil, err
+			}
+			return nil, newParseError(err.Error())
+		}
 	}
 
 	// Send continuation request if necessary

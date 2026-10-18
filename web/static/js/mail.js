@@ -1,8 +1,9 @@
 // Mail views: conversation list, conversation reader and drafts.
 import { $, $$, html, raw, icon, el, setHTML, api, bus, snack, menu, avatar, shortDate, fullDate, ago, bytes, longDate, greeting,
   plural, toastError, confirmDialog, fileIcon, people, esc } from './lib.js';
-import { S, folderName, navigate, setCounts, refreshCounts } from './state.js';
+import { S, folderName, folderPath, isCustom, navigate, setCounts, refreshCounts } from './state.js';
 import * as compose from './compose.js';
+import { moveMenu, blockSender, allowSender, unlistSender, filterDialog, senderStatus } from './folders.js';
 
 const PAGE = 50;
 const cache = new Map();      // list key -> {items,total}
@@ -22,11 +23,12 @@ const FILTERS = [
   { id: 'attach', label: 'Attachments', q: 'has:attachment', icon: 'attach_file' },
 ];
 const REAL = ['inbox', 'sent', 'archive', 'spam', 'trash'];
+const isReal = (f) => REAL.includes(f) || isCustom(f);
 
 function apiQuery(r) {
   if (r.folder === 'search') return `q=${encodeURIComponent(r.q)}`;
   const f = FILTERS.find((x) => x.id === r.filter && x.id);
-  if (f && REAL.includes(r.folder)) return `q=${encodeURIComponent(`in:${r.folder} ${f.q}`)}`;
+  if (f && isReal(r.folder)) return `q=${encodeURIComponent(`in:${r.folder} ${f.q}`)}`;
   if (f && r.folder === 'all') return `q=${encodeURIComponent(f.q)}`;
   if (f && r.folder === 'starred') return `q=${encodeURIComponent(`is:starred ${f.q}`)}`;
   return `folder=${r.folder}`;
@@ -35,27 +37,52 @@ function apiQuery(r) {
 // Which bulk actions apply in each view: [action, icon, label]
 function actionsFor(folder) {
   const read = [['read', 'mark_email_read', 'Mark as read'], ['unread', 'mark_email_unread', 'Mark as unread']];
+  const move = ['move', 'drive_file_move', 'Move to'];
+  if (isCustom(folder)) return [['archive', 'archive', 'Archive'], move, ['spam', 'report', 'Report spam'], ['trash', 'delete', 'Delete'], ...read];
   switch (folder) {
-    case 'inbox': return [['archive', 'archive', 'Archive'], ['spam', 'report', 'Report spam'], ['trash', 'delete', 'Delete'], ...read];
-    case 'archive': return [['inbox', 'move_to_inbox', 'Move to Inbox'], ['spam', 'report', 'Report spam'], ['trash', 'delete', 'Delete'], ...read];
-    case 'sent': return [['trash', 'delete', 'Delete'], ...read];
+    case 'inbox': return [['archive', 'archive', 'Archive'], move, ['spam', 'report', 'Report spam'], ['trash', 'delete', 'Delete'], ...read];
+    case 'archive': return [['inbox', 'move_to_inbox', 'Move to Inbox'], move, ['spam', 'report', 'Report spam'], ['trash', 'delete', 'Delete'], ...read];
+    case 'sent': return [move, ['trash', 'delete', 'Delete'], ...read];
     case 'spam': return [['inbox', 'report_off', 'Not spam'], ['delete', 'delete_forever', 'Delete forever'], ...read];
-    case 'trash': return [['inbox', 'restore_from_trash', 'Restore'], ['delete', 'delete_forever', 'Delete forever'], ...read];
-    default: return [['archive', 'archive', 'Archive'], ['trash', 'delete', 'Delete'], ...read];
+    case 'trash': return [['inbox', 'restore_from_trash', 'Restore'], move, ['delete', 'delete_forever', 'Delete forever'], ...read];
+    default: return [['archive', 'archive', 'Archive'], move, ['trash', 'delete', 'Delete'], ...read];
   }
 }
 const viewOf = (r) => (r.folder === 'search' ? 'search' : r.folder);
 const MOVE_MSG = { archive: 'Archived', trash: 'Moved to Trash', spam: 'Reported as spam', inbox: 'Moved to Inbox', delete: 'Deleted forever' };
-const UNDO = { archive: ['archive', 'inbox'], trash: ['trash', 'inbox'], spam: ['spam', 'inbox'] };
+// Undo: [view to act from, action]. Unarchive returns each message to where it was archived from.
+const UNDO = { archive: ['archive', 'unarchive'], trash: ['trash', 'inbox'], spam: ['spam', 'inbox'] };
+
+// How to undo "move to <target>" as seen from a view (moving back is a different action per view).
+function moveUndo(view) {
+  if (view === 'inbox' || view === 'archive' || isCustom(view)) return 'move:' + view;
+  return { sent: 'inbox', trash: 'trash', spam: 'spam' }[view] || null;
+}
 
 async function act(threads, view, action, { undo = true, quiet = false, ids } = {}) {
   const res = await api('/threads/action', { method: 'POST', body: { threads, view, action, ...(ids ? { ids } : {}) } });
   setCounts(res.counts);
   cache.clear();
+  if (action.startsWith('move:')) {
+    if (quiet) return;
+    const target = action.slice(5);
+    const n = threads.length;
+    const back = undo && moveUndo(view);
+    snack(`${n > 1 ? plural(n, 'conversation') : 'Conversation'} moved to ${folderPath(target)}`, back && res.ids.length ? {
+      action: 'Undo',
+      onAction: async () => {
+        try { await act(threads, target, back, { quiet: true, ids: res.ids }); snack('Action undone'); onRemoteChange(true); } catch (e) { toastError(e); }
+      },
+    } : {});
+    return;
+  }
   if (quiet || !MOVE_MSG[action]) return;
   const n = threads.length;
   const label = `${n > 1 ? plural(n, 'conversation') : 'Conversation'} ${MOVE_MSG[action].toLowerCase()}`;
-  const u = undo && UNDO[action];
+  let u = undo && UNDO[action];
+  // Report spam from one of your folders is undone by moving back into it (Archive and Delete
+  // are undone by actions that already return mail to where it was).
+  if (u && isCustom(view) && action === 'spam') u = [action, 'move:' + view];
   snack(label, u ? {
     action: 'Undo',
     onAction: async () => {
@@ -128,7 +155,7 @@ function paintListFrame(viewEl, state) {
   const r = state.r;
   const me = S.me.user;
   const isSearch = r.folder === 'search';
-  const title = isSearch ? 'Search results' : folderName(r.folder);
+  const title = isSearch ? 'Search results' : folderPath(r.folder);
   const unread = S.counts?.[r.folder] || 0;
   const showFilters = !isSearch;
   setHTML(viewEl, html`
@@ -196,7 +223,7 @@ function paintToolbar(state) {
   ], { align: 'left' }));
   $('#pg-prev').onclick = () => navigate(listHash(r, r.page - 1));
   $('#pg-next').onclick = () => navigate(listHash(r, r.page + 1));
-  tb.querySelectorAll('[data-bulk]').forEach((b) => (b.onclick = () => bulk(state, b.dataset.bulk)));
+  tb.querySelectorAll('[data-bulk]').forEach((b) => (b.onclick = () => bulk(state, b.dataset.bulk, undefined, b)));
   const chip = $('#chip-total');
   if (chip) {
     chip.textContent = !state.loaded ? '' : state.total ? plural(state.total, 'conversation') : 'No conversations';
@@ -214,7 +241,7 @@ function rowHTML(t, state, i) {
   if (sent) who = 'To: ' + (t.to || []).map((a) => a.name || people.get(a.email)?.name || a.email.split('@')[0]).join(', ');
   else who = (t.participants || []).slice(0, 3).join(', ') + ((t.participants || []).length > 3 ? ' …' : '');
   const showFolder = (r.folder === 'search' || r.folder === 'all' || r.folder === 'starred') && t.folder !== 'inbox';
-  const acts = actionsFor(viewOf(r)).slice(0, 3);
+  const acts = actionsFor(viewOf(r)).filter(([a]) => a !== 'move').slice(0, 3); // same quick actions as before Move to existed
   const readAct = t.unread ? ['read', 'mark_email_read', 'Mark as read'] : ['unread', 'mark_email_unread', 'Mark as unread'];
   const firstPerson = sent ? (t.to?.[0] || {}) : { name: t.participants?.[0], email: t.from_email };
   const tabStop = i === Math.max(0, state.focus);
@@ -252,7 +279,7 @@ function paintRows(state) {
       trash: ['delete', 'Trash is empty', 'Deleted conversations stay here for 30 days.'],
       all: ['all_inbox', 'No mail yet', ''],
       search: ['search', 'No messages matched your search', 'Try different words, or use search options like from: or has:attachment.'],
-    }[r.folder] || ['inbox', 'Nothing here', ''];
+    }[r.folder] || (isCustom(r.folder) ? ['folder', 'This folder is empty', 'Move conversations here with “Move to”, or create a filter in Settings to file new mail here automatically.'] : ['inbox', 'Nothing here', '']);
     setHTML(list, html`<div class="empty">${icon(empty[0])}<h3>${r.filter ? 'Nothing matches this filter' : empty[1]}</h3><p>${r.filter ? '' : empty[2]}</p></div>`);
   } else {
     setHTML(list, state.items.map((t, i) => rowHTML(t, state, i)));
@@ -295,7 +322,7 @@ function wireList(state) {
     const ra = e.target.closest('[data-row-act]');
     if (ra) {
       e.stopPropagation();
-      return bulk(state, ra.dataset.rowAct, [t.thread_id]);
+      return bulk(state, ra.dataset.rowAct, [t.thread_id], ra);
     }
     if (e.ctrlKey || e.metaKey) { state.selected.add(t.thread_id); return paintSelection(state); }
     navigate(threadHash(state.r, t.thread_id));
@@ -326,10 +353,14 @@ async function toggleStar(state, t) {
   }
 }
 
-async function bulk(state, action, ids = [...state.selected]) {
+async function bulk(state, action, ids = [...state.selected], anchor) {
   if (!ids.length) return;
+  if (action === 'move') {
+    const at = anchor || $('#toolbar [data-bulk="move"]') || $(`#list .row[data-tid="${ids[0]}"]`) || $('#toolbar');
+    return moveMenu(at, { exclude: viewOf(state.r), onPick: (target) => bulk(state, 'move:' + target, ids) });
+  }
   if (action === 'delete' && !(await confirmDialog('Delete forever?', `${plural(ids.length, 'conversation')} will be permanently deleted. This can't be undone.`, 'Delete forever', true))) return;
-  const removes = ['archive', 'trash', 'spam', 'inbox', 'delete'].includes(action);
+  const removes = ['archive', 'trash', 'spam', 'inbox', 'delete'].includes(action) || (action.startsWith('move:') && action.slice(5) !== state.r.folder && !['all', 'starred', 'search'].includes(state.r.folder));
   const before = state.items;
   if (removes) {
     state.items = state.items.filter((t) => !ids.includes(t.thread_id));
@@ -391,7 +422,7 @@ function listKeys(state, e) {
   if (k === 's' && t) { toggleStar(state, t); return true; }
   const ids = state.selected.size ? [...state.selected] : t ? [t.thread_id] : [];
   const avail = actionsFor(viewOf(state.r)).map((a) => a[0]);
-  const map = { e: 'archive', '#': avail.includes('trash') ? 'trash' : 'delete', '!': 'spam', I: 'read', U: 'unread' };
+  const map = { e: 'archive', v: 'move', '#': avail.includes('trash') ? 'trash' : 'delete', '!': 'spam', I: 'read', U: 'unread' };
   const a = map[k];
   if (a && avail.includes(a) && ids.length) { bulk(state, a, ids); return true; }
   return false;
@@ -468,10 +499,12 @@ function reloadThread(state, force) {
 function threadFolder(state) {
   // the "real" folder of this conversation as seen from the current view
   const r = state.r;
-  if (REAL.includes(r.folder)) return r.folder;
+  if (isReal(r.folder)) return r.folder;
   const fs = new Set(state.messages.map((m) => m.folder));
   if (fs.has('inbox')) return 'inbox';
   if (fs.has('archive')) return 'archive';
+  const own = [...fs].find(isCustom);
+  if (own) return own;
   return [...fs][0] || 'all';
 }
 
@@ -496,7 +529,7 @@ function paintThreadToolbar(state) {
     <button class="icon-btn" id="t-newer" data-tip="Newer" aria-label="Newer" ${nb.newer ? '' : raw('disabled')}>${icon('chevron_left')}</button>
     <button class="icon-btn" id="t-older" data-tip="Older" aria-label="Older" ${nb.older ? '' : raw('disabled')}>${icon('chevron_right')}</button>`);
   $('#back').onclick = () => navigate(S.lastList || '#/inbox');
-  tb.querySelectorAll('[data-tact]').forEach((b) => (b.onclick = () => threadAction(state, b.dataset.tact)));
+  tb.querySelectorAll('[data-tact]').forEach((b) => (b.onclick = () => threadAction(state, b.dataset.tact, b)));
   $('#t-newer').onclick = () => nb.newer && navigate(threadHash(state.r, nb.newer.thread_id));
   $('#t-older').onclick = () => nb.older && navigate(threadHash(state.r, nb.older.thread_id));
   $('#t-more').onclick = (e) => {
@@ -510,7 +543,10 @@ function paintThreadToolbar(state) {
   };
 }
 
-async function threadAction(state, action) {
+async function threadAction(state, action, anchor) {
+  if (action === 'move') {
+    return moveMenu(anchor || $('#toolbar [data-tact="move"]') || $('#toolbar'), { exclude: threadFolder(state), onPick: (target) => threadAction(state, 'move:' + target) });
+  }
   if (action === 'delete' && !(await confirmDialog('Delete forever?', "This conversation will be permanently deleted. This can't be undone.", 'Delete forever', true))) return;
   if (action === 'unread') {
     try { await act([state.id], 'all', 'unread', { undo: false }); } catch (e) { return toastError(e); }
@@ -667,13 +703,7 @@ function wireThread(state, box) {
     if (e.target.closest('[data-reply]')) { e.stopPropagation(); return replyTo(state, m, 'reply'); }
     if (e.target.closest('[data-mmore]')) {
       e.stopPropagation();
-      return menu(e.target.closest('[data-mmore]'), [
-        { icon: 'reply', label: 'Reply', onClick: () => replyTo(state, m, 'reply') },
-        { icon: 'reply_all', label: 'Reply all', onClick: () => replyTo(state, m, 'replyall') },
-        { icon: 'forward', label: 'Forward', onClick: () => replyTo(state, m, 'forward') },
-        'sep',
-        { icon: 'download', label: 'Download message (.eml)', onClick: () => window.open(`/api/messages/${m.id}/raw`, '_blank') },
-      ]);
+      return messageMenu(state, m, e.target.closest('[data-mmore]'));
     }
     if (e.target.closest('[data-details]')) {
       e.stopPropagation();
@@ -747,6 +777,32 @@ function mountFrame(state, m) {
   };
 }
 
+async function messageMenu(state, m, anchor) {
+  const email = m.from?.email || '';
+  const mine = !email || email.toLowerCase() === S.me.user.email.toLowerCase();
+  const { kind, pattern } = mine ? { kind: '', pattern: '' } : await senderStatus(email);
+  const who = m.from.name || email;
+  const items = [
+    { icon: 'reply', label: 'Reply', onClick: () => replyTo(state, m, 'reply') },
+    { icon: 'reply_all', label: 'Reply all', onClick: () => replyTo(state, m, 'replyall') },
+    { icon: 'forward', label: 'Forward', onClick: () => replyTo(state, m, 'forward') },
+    'sep',
+  ];
+  if (!mine) {
+    items.push({ icon: 'filter_alt', label: 'Filter messages like this', onClick: () => filterDialog({ from: email }) });
+    if (kind === 'block') {
+      // The block may be on the whole domain: unblock what is actually blocked.
+      const what = pattern && pattern.startsWith('@') ? pattern.slice(1) : who;
+      items.push({ icon: 'check_circle', label: `Unblock ${what}`, onClick: async () => { if (await unlistSender(pattern || email)) { snack(`${what} unblocked`); onRemoteChange(true); } } });
+    }
+    else items.push({ icon: 'block', label: `Block ${who}`, onClick: () => blockSender(email, m.from.name).then((r) => { if (r?.moved) navigate(S.lastList || '#/inbox'); else if (r) onRemoteChange(true); }) });
+    if (kind !== 'allow') items.push({ icon: 'verified_user', label: m.folder === 'spam' ? 'Never send to Spam' : 'Always allow (never Spam)', onClick: () => allowSender(email) });
+    items.push('sep');
+  }
+  items.push({ icon: 'download', label: 'Download message (.eml)', onClick: () => window.open(`/api/messages/${m.id}/raw`, '_blank') });
+  if (anchor.isConnected) menu(anchor, items);
+}
+
 function replyTo(state, m, mode) {
   if (!m) return;
   compose.open({ mode, source: m, thread: state.messages });
@@ -762,6 +818,7 @@ function threadKeys(state, e) {
     case 'a': replyTo(state, last, 'replyall'); return true;
     case 'f': replyTo(state, last, 'forward'); return true;
     case 'e': if (folderActs.includes('archive')) threadAction(state, 'archive'); return true;
+    case 'v': if (folderActs.includes('move')) threadAction(state, 'move'); return true;
     case '#': threadAction(state, folderActs.includes('trash') ? 'trash' : 'delete'); return true;
     case '!': if (folderActs.includes('spam')) threadAction(state, 'spam'); return true;
     case 'U': threadAction(state, 'unread'); return true;

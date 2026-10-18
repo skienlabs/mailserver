@@ -1,10 +1,12 @@
 // Skien Mails — application shell, routing, live updates and keyboard shortcuts.
 import { SPRITE } from './icons.js';
 import { $, html, raw, icon, el, setHTML, api, bus, snack, dialog, menu, avatar, bytes, greeting, toastError, debounce } from './lib.js';
-import { S, FOLDERS, folderName, navigate, parseRoute, setTheme, themePref, setCounts, refreshCounts, loadDirectory, applyTheme, pref } from './state.js';
+import { S, FOLDERS, folderPath, isCustom, navigate, parseRoute, setTheme, themePref, setCounts, refreshCounts, loadDirectory, loadFolders, applyTheme, pref } from './state.js';
+import { newFolderDialog, folderMenu } from './folders.js';
 import * as auth from './auth.js';
 import * as mail from './mail.js';
 import * as compose from './compose.js';
+import { pushActiveHere, syncPush, beforeSignOut } from './push.js';
 
 document.body.insertAdjacentHTML('afterbegin', SPRITE);
 const root = document.getElementById('root');
@@ -34,10 +36,11 @@ async function boot() {
   }
   if (S.me.user.must_change_password) return auth.renderForceChange(root, S.me, boot);
   setCounts(S.me.counts);
-  await loadDirectory(); // small; loaded first so profile photos show on the first paint
+  await Promise.all([loadDirectory(), loadFolders()]); // small; loaded first so photos and folders show on the first paint
   renderShell();
   connectEvents();
   route();
+  syncPush();
 }
 
 function renderOffline(e) {
@@ -157,12 +160,39 @@ function renderNav() {
     const ic = active ? (f.active || f.icon + '-f') : f.icon;
     return item('#/' + f.id, ic, f.name, active, n, f.id === 'inbox' && n > 0);
   });
+  const open = pref.get('foldersOpen', true);
+  const own = S.folders || [];
+  const custom = own.map((f) => {
+    const active = cur === f.key;
+    const n = c[f.key] || 0;
+    return html`<div class="folder-row" style="--depth:${f.depth}"><a class="nav-item folder-item ${active ? 'active' : ''} ${n ? 'unread' : ''}" href="#/${f.key}" data-fkey="${f.key}" ${active ? raw('aria-current="page"') : ''} data-tip="${f.name}">
+      ${icon(active ? 'folder-f' : 'folder')}<span>${f.leaf}</span>${n ? html`<b class="count">${n > 999 ? '999+' : n}</b>` : ''}</a><button class="icon-btn sm folder-more" data-fmore="${f.key}" aria-label="Actions for folder ${f.name}" data-tip="Folder actions">${icon('more_vert')}</button></div>`;
+  });
   setHTML(nav, html`${folders}
+    <div class="nav-section folders-head">
+      <button class="folders-toggle" id="folders-toggle" aria-expanded="${open}">${icon(open ? 'expand_less' : 'expand_more', 's')}<span>Folders</span></button>
+      <button class="icon-btn sm" id="new-folder" data-tip="New folder" aria-label="New folder">${icon('add')}</button>
+    </div>
+    ${open ? custom : ''}
+    ${open && !own.length ? html`<button class="nav-item nav-hint" id="new-folder-2">${icon('create_new_folder')}<span>Create a folder</span></button>` : ''}
     <div class="nav-section">Workspace</div>
     ${item('#/people', cur === 'people' ? 'contacts-f' : 'contacts', 'People', cur === 'people')}
     ${item('#/settings', cur === 'settings' ? 'settings-f' : 'settings', 'Settings', cur === 'settings')}
     ${S.me.user.role === 'admin' ? item('#/admin', cur === 'admin' ? 'dashboard-f' : 'admin_panel_settings', 'Admin console', cur === 'admin') : ''}`);
-  nav.querySelectorAll('a').forEach((a) => a.addEventListener('click', () => $('#app')?.classList.remove('drawer-open')));
+  nav.querySelectorAll('a').forEach((a) => a.addEventListener('click', (e) => {
+    if (e.target.closest('[data-fmore]')) return;
+    $('#app')?.classList.remove('drawer-open');
+  }));
+  $('#folders-toggle').onclick = () => { pref.set('foldersOpen', !open); renderNav(); };
+  const create = () => newFolderDialog().then((f) => f && navigate('#/' + f.key));
+  $('#new-folder').onclick = create;
+  $('#new-folder-2')?.addEventListener('click', create);
+  const openMenuFor = (key, anchor) => {
+    const f = own.find((x) => x.key === key);
+    if (f) folderMenu(anchor, f, { onChange: () => { if (isCustom(S.route.folder) && !S.folders.some((x) => x.key === S.route.folder)) navigate('#/inbox'); } });
+  };
+  nav.querySelectorAll('[data-fmore]').forEach((b) => (b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openMenuFor(b.dataset.fmore, b); }));
+  nav.querySelectorAll('[data-fkey]').forEach((a) => a.addEventListener('contextmenu', (e) => { e.preventDefault(); openMenuFor(a.dataset.fkey, a); }));
   renderFoot();
   updateTitle();
 }
@@ -182,12 +212,13 @@ function renderFoot() {
 }
 
 bus.on('counts', () => { if (shellReady) { renderNav(); updateBadge(); } });
+bus.on('folders', () => { if (shellReady) { renderNav(); updateTitle(); } });
 
 function updateTitle() {
   const r = S.route;
   const n = S.counts?.inbox || 0;
   let label = 'Mail';
-  if (r.name === 'list' || r.name === 'thread' || r.name === 'drafts') label = r.folder === 'search' ? `Search results` : folderName(r.folder);
+  if (r.name === 'list' || r.name === 'thread' || r.name === 'drafts') label = r.folder === 'search' ? `Search results` : folderPath(r.folder);
   else if (r.name === 'settings') label = 'Settings';
   else if (r.name === 'admin') label = 'Admin console';
   else if (r.name === 'people') label = 'People';
@@ -222,7 +253,7 @@ function accountMenu(anchor) {
 }
 
 async function signOut() {
-  try { await compose.closeAll(); await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+  try { await compose.closeAll(); await beforeSignOut(); await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
   closeEvents();
   shellReady = false;
   S.me = null;
@@ -381,6 +412,7 @@ function connectEvents() {
     try { ev = JSON.parse(m.data); } catch { return; }
     if (ev.type === 'signout') { closeEvents(); boot(); return; }
     if (ev.type === 'mail') notifyNewMail(ev);
+    if (ev.type === 'folders') { loadFolders(); return; }
     onSync(ev);
   };
   es.onerror = () => {
@@ -399,6 +431,7 @@ const onSync = debounce(() => {
 
 async function notifyNewMail(ev) {
   if (!pref.get('notify', false) || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (pushActiveHere()) return; // the push notification for this mail arrives anyway (sw.js)
   if (document.visibilityState === 'visible' && document.hasFocus()) return;
   const title = ev.from || 'New message';
   const opts = { body: ev.subject || '(no subject)', icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: 'sm-new-mail', renotify: true, data: { url: '/#/inbox' } };
@@ -418,7 +451,7 @@ let gPrefix = 0;
 document.addEventListener('keydown', (e) => {
   if (!shellReady || e.defaultPrevented) return;
   const t = e.target;
-  const typing = t.closest?.('input, textarea, select, [contenteditable="true"], [contenteditable=""]');
+  const typing = t.closest?.('input:not([type=checkbox]):not([type=radio]), textarea, select, [contenteditable="true"], [contenteditable=""]');
   if (document.querySelector('dialog[open]')) return;
   if (typing) {
     if (e.key === 'Escape' && t.id === 'search-input') t.blur();
@@ -446,6 +479,11 @@ document.addEventListener('keydown', (e) => {
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   const hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.register('/sw.js').catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    // A notification was clicked while the app was open: show that conversation.
+    const url = e.data && e.data.type === 'open' && typeof e.data.url === 'string' ? e.data.url : '';
+    if (url.startsWith('/#/')) location.hash = url.slice(1);
+  });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (hadController) snack('A new version of Skien Mails is ready', { action: 'Reload', onAction: () => location.reload(), timeout: 0 });
   });

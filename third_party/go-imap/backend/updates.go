@@ -96,3 +96,30 @@ type MailboxPoller interface {
 	// Poll requests mailbox updates.
 	Poll() error
 }
+
+// Skien Mails patch (see PATCHES.md).
+
+// ResponseWriterBinder is implemented by mailboxes that write their own untagged responses
+// (EXPUNGE, EXISTS, FETCH FLAGS) to the connection that selected them.
+type ResponseWriterBinder interface {
+	BindResponseWriter(write func(imap.WriterTo) error)
+}
+
+// IdleNotifier is implemented by mailboxes that can signal changes while a client idles.
+// The returned stop function releases the notifier.
+type IdleNotifier interface {
+	IdleNotify() (<-chan struct{}, func())
+}
+
+// ReadOnlySetter is told whether the selected mailbox was opened read-only (EXAMINE), so that
+// FETCH doesn't set \Seen there.
+type ReadOnlySetter interface {
+	SetReadOnly(bool)
+}
+
+// ExpungeReporter is implemented by mailboxes that expunge and report the EXPUNGE responses
+// themselves (through their bound writer), deciding what to remove from current flags at that
+// moment, so the numbers reported always match what was removed.
+type ExpungeReporter interface {
+	ExpungeAndReport() error
+}

@@ -1,15 +1,18 @@
 // Personal settings: profile, appearance, notifications, security, out-of-office, email apps.
 import { $, html, raw, icon, setHTML, api, upload, snack, avatar, ago, field, passwordToggle, toastError, squareImage, confirmDialog, dateOnly, copyText,
   selectField, bytes, plural, bus } from './lib.js';
-import { S, setTheme, themePref, navigate, pref, loadDirectory } from './state.js';
+import { S, setTheme, themePref, navigate, pref, loadDirectory, loadFolders, folderPath } from './state.js';
 import { cleanForEditor } from './compose.js';
+import { newFolderDialog, renameFolderDialog, deleteFolderDialog, filterDialog, unlistSender } from './folders.js';
+import { pushSupport, enablePush, disablePush, thisDevice } from './push.js';
 
 const TABS = [
   ['general', 'person', 'General'],
   ['security', 'lock', 'Security'],
   ['vacation', 'beach_access', 'Out of office'],
+  ['filters', 'filter_alt', 'Filters & blocked'],
   ['apps', 'devices', 'Email apps'],
-  ['import', 'download', 'Import mail'],
+  ['import', 'download', 'Import & export'],
 ];
 
 export function render(viewEl, r) {
@@ -19,7 +22,7 @@ export function render(viewEl, r) {
     <nav class="tabs">${TABS.map(([id, ic, label]) => html`<a class="tab ${tab === id ? 'on' : ''}" href="#/settings/${id}">${icon(ic, 's')}${label}</a>`)}</nav>
     <div class="page"><div class="page-inner" id="pane"></div></div>`);
   const pane = $('#pane');
-  ({ general, security, vacation, apps, import: importMail })[tab](pane);
+  ({ general, security, vacation, filters, apps, import: importMail })[tab](pane);
 }
 
 // ---------------------------------------------------------------- general
@@ -67,8 +70,9 @@ function general(pane) {
     <div class="section">
       <h2>Notifications</h2>
       <div class="panel" style="padding:4px 20px">
-        <label class="kv check" style="width:100%"><span class="v"><b>Desktop notifications</b><br><span class="muted small">Get a notification when new mail arrives while Skien Mails is in the background.</span></span>
+        <label class="kv check" style="width:100%"><span class="v"><b>Desktop notifications</b><br><span class="muted small">Get a notification when new mail arrives while Skien Mails is open in the background.</span></span>
           <input type="checkbox" class="switch" id="notify" ${notifyOn ? raw('checked') : ''}></label>
+        <div id="push-box"></div>
       </div>
     </div>
     <div class="section">
@@ -124,6 +128,7 @@ function general(pane) {
     pref.set('notify', true);
     snack('You’ll be notified about new mail');
   };
+  renderPushBox($('#push-box'));
   $('#install')?.addEventListener('click', async () => {
     const p = S.installPrompt;
     S.installPrompt = null;
@@ -134,6 +139,58 @@ function general(pane) {
 }
 
 // ---------------------------------------------------------------- security
+// Notifications while the app is closed (Web Push), for this browser, plus the other devices.
+async function renderPushBox(box) {
+  if (!box) return;
+  const sup = pushSupport();
+  const title = html`<b>When Skien Mails is closed</b>`;
+  if (!sup.ok) {
+    setHTML(box, html`<div class="kv"><span class="v">${title}<br><span class="muted small">${sup.reason}</span></span></div>`);
+    return;
+  }
+  let info;
+  try { info = await api('/push'); } catch (e) { setHTML(box, html`<div class="kv"><span class="v">${title}<br><span class="form-err">${e.message}</span></span></div>`); return; }
+  if (!box.isConnected) return;
+  const mine = Notification.permission === 'granted' ? await thisDevice(info.devices) : null;
+  if (!box.isConnected) return;
+  const others = info.devices.filter((d) => !mine || d.id !== mine.id);
+  setHTML(box, html`
+    <label class="kv check" style="width:100%"><span class="v">${title}<br><span class="muted small">Get new-mail notifications on this device even when the app or browser tab is closed.</span></span>
+      <input type="checkbox" class="switch" id="push-on" ${mine ? raw('checked') : ''} ${info.available ? '' : raw('disabled')}></label>
+    ${mine ? html`
+      <label class="kv check" style="width:100%"><span class="v"><b>Show sender and subject</b><br><span class="muted small">Turn off to show only “New message”, for example on a shared computer or a phone’s lock screen.</span></span>
+        <input type="checkbox" class="switch" id="push-preview" ${mine.preview ? raw('checked') : ''}></label>
+      <div class="kv"><span class="v">${mine.last_err ? html`<span class="muted small">Last attempt failed: ${mine.last_err}</span>` : ''}</span>
+        <button class="btn tonal" id="push-test">${icon('notifications_active')}Send a test notification</button></div>` : ''}
+    ${others.length ? html`
+      <div class="kv push-devices"><span class="v"><b>Other devices with notifications</b>
+        ${others.map((d) => { const ua = describeUA(d.label); return html`<div class="push-dev"><span>${icon(ua.mobile ? 'smartphone' : 'desktop_windows', 's')}${ua.label}<span class="muted small"> · ${d.last_ok ? 'last notified ' + ago(d.last_ok) : 'added ' + ago(d.created_at)}</span></span>
+          <button class="btn" data-push-rm="${d.id}">Remove</button></div>`; })}</span></div>` : ''}`);
+
+  const on = $('#push-on', box);
+  on.onchange = async () => {
+    on.disabled = true;
+    try {
+      if (on.checked) { await enablePush(true); snack('Notifications are on for this device'); }
+      else { await disablePush(mine?.id); snack('Notifications are off for this device'); }
+    } catch (e) { on.checked = !on.checked; snack(e.message || 'Couldn’t change notifications'); }
+    renderPushBox(box);
+  };
+  const pv = $('#push-preview', box);
+  if (pv) pv.onchange = async () => {
+    try { await api('/push/' + mine.id, { method: 'PUT', body: { preview: pv.checked } }); } catch (e) { pv.checked = !pv.checked; toastError(e); }
+  };
+  const test = $('#push-test', box);
+  if (test) test.onclick = async () => {
+    test.classList.add('busy');
+    try { await api('/push/' + mine.id + '/test', { method: 'POST' }); snack('Test notification sent'); } catch (e) { toastError(e); renderPushBox(box); }
+    finally { test.classList.remove('busy'); }
+  };
+  box.querySelectorAll('[data-push-rm]').forEach((b) => (b.onclick = async () => {
+    try { await api('/push/' + b.dataset.pushRm, { method: 'DELETE' }); renderPushBox(box); } catch (e) { toastError(e); }
+  }));
+}
+
 function describeUA(ua) {
   const b = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Browser';
   const os = /Windows/.test(ua) ? 'Windows' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iOS' : /Mac OS X/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : '';
@@ -200,6 +257,163 @@ async function security(pane) {
   loadSessions();
 }
 
+// ---------------------------------------------------------------- export
+async function loadExport() {
+  let list;
+  try { list = await api('/export/folders'); } catch (e) { return toastError(e); }
+  const box = $('#exp-panel');
+  if (!box) return;
+  setHTML(box, html`<form id="exp-form">
+      <div class="exp-folders">${list.map((f) => html`<label class="check exp-folder" style="--depth:${f.name.split('/').length - 1}">
+        <input type="checkbox" class="cb" name="f" value="${f.key}" ${f.default ? raw('checked') : ''} data-bytes="${f.bytes}" data-n="${f.messages}">
+        <span>${f.name}</span><span class="muted small">${plural(f.messages, 'message')} · ${bytes(f.bytes)}</span></label>`)}</div>
+      <p class="small muted" id="exp-sum"></p>
+      <div class="form-actions" style="justify-content:flex-start"><button class="btn filled" type="submit" id="exp-go">${icon('download')}Download .zip</button></div>
+    </form>`);
+  const form = $('#exp-form');
+  const sum = () => {
+    const on = [...form.querySelectorAll('[name=f]:checked')];
+    const n = on.reduce((t, c) => t + +c.dataset.n, 0);
+    const b = on.reduce((t, c) => t + +c.dataset.bytes, 0);
+    $('#exp-sum').textContent = on.length ? `${plural(n, 'message')}, about ${bytes(b)} before compression.${b > 500 * 1048576 ? ' Large exports take a while — keep this tab open until the download finishes.' : ''}` : 'Choose at least one folder.';
+    $('#exp-go').disabled = !on.length;
+  };
+  form.onchange = sum;
+  sum();
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const keys = [...form.querySelectorAll('[name=f]:checked')].map((c) => c.value);
+    const q = `folders=${encodeURIComponent(keys.join(','))}`;
+    try { await api(`/export?check=1&${q}`); } catch (er) { return toastError(er); }
+    const a = document.createElement('a');
+    a.href = `/api/export?${q}`;
+    a.download = '';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    snack('Your download is starting');
+  };
+}
+
+// ---------------------------------------------------------------- folders, filters, blocked/allowed senders
+async function filters(pane) {
+  setHTML(pane, html`
+    <div class="section">
+      <div class="sec-head"><div><h2>Folders</h2><p class="lead">Your own folders, shown in the side menu. Deleting a folder moves its mail to Archive.</p></div>
+        <button class="btn tonal" id="add-folder">${icon('create_new_folder')}New folder</button></div>
+      <div class="panel" id="folder-list" style="padding:4px 20px"></div>
+    </div>
+    <div class="section">
+      <div class="sec-head"><div><h2>Filters</h2><p class="lead">Sort new mail automatically as it arrives. Filters run top to bottom; the first one that moves a message decides its folder.</p></div>
+        <button class="btn tonal" id="add-filter">${icon('add')}New filter</button></div>
+      <div class="panel" id="filter-list" style="padding:4px 20px"></div>
+    </div>
+    <div class="section">
+      <h2>Blocked and allowed senders</h2>
+      <p class="lead">Mail from blocked addresses or domains goes straight to Spam. Allowed senders never go to Spam when their mail is verified as really coming from their domain, so forged copies still do.</p>
+      <div class="panel" style="padding:12px 20px">
+        <form id="sender-form" class="sender-form" autocomplete="off">
+          ${field({ label: 'Email address or domain', name: 'pattern', attrs: 'spellcheck="false" autocapitalize="off" maxlength="254"', hint: 'Like name@example.com, or example.com for everyone there' })}
+          ${selectField({ label: 'List', name: 'kind', value: 'block', options: [{ value: 'block', label: 'Block' }, { value: 'allow', label: 'Always allow' }] })}
+          <button class="btn filled" type="submit">Add</button>
+        </form>
+        <div id="sender-list"></div>
+      </div>
+    </div>`);
+
+  const loadFolderList = async () => {
+    const box = $('#folder-list');
+    if (!box) return;
+    const list = S.folders || [];
+    setHTML(box, list.length ? list.map((f) => html`<div class="kv folder-kv" style="--depth:${f.depth}">
+        <span>${icon('folder')}</span>
+        <div class="v"><b>${f.leaf}</b>${f.depth ? html` <span class="muted small">in ${f.name.slice(0, -f.leaf.length - 1)}</span>` : ''}<br>
+          <span class="muted small">${plural(f.total, 'message')}${f.unread ? ` · ${f.unread} unread` : ''}</span></div>
+        <button class="icon-btn" data-fedit="${f.id}" data-tip="Rename" aria-label="Rename ${f.name}">${icon('edit')}</button>
+        <button class="icon-btn" data-fdel="${f.id}" data-tip="Delete" aria-label="Delete ${f.name}">${icon('delete')}</button>
+      </div>`) : html`<p class="muted" style="margin:14px 0">No folders yet. Create one here or with “Move to” → “New folder…” on any conversation.</p>`);
+    box.querySelectorAll('[data-fedit]').forEach((b) => (b.onclick = () => renameFolderDialog(list.find((x) => x.id === +b.dataset.fedit))));
+    box.querySelectorAll('[data-fdel]').forEach((b) => (b.onclick = () => deleteFolderDialog(list.find((x) => x.id === +b.dataset.fdel))));
+  };
+  const off = bus.on('folders', () => { if (pane.isConnected) { loadFolderList(); loadFilters(); } else off?.(); });
+  $('#add-folder').onclick = () => newFolderDialog();
+
+  const describe = (f) => {
+    const cond = [['From', f.from], ['To', f.to], ['Subject', f.subject], ['Words', f.words]].filter((x) => x[1]).map(([k, v]) => html`<span class="muted">${k}:</span> ${v}`);
+    const acts = [];
+    if (f.folder) acts.push(f.folder === 'archive' ? 'Skip the inbox (Archive)' : f.folder === 'trash' ? 'Delete it' : `Move to ${folderPath(f.folder)}`);
+    if (f.mark_read) acts.push('Mark as read');
+    if (f.star) acts.push('Star it');
+    return html`${cond.map((c, i) => html`${i ? ' · ' : ''}${c}`)}<br><span class="small">→ ${acts.join(', ') || 'Nothing'}</span>`;
+  };
+  const loadFilters = async () => {
+    let list;
+    try { list = await api('/filters'); } catch (e) { return toastError(e); }
+    const box = $('#filter-list');
+    if (!box) return;
+    setHTML(box, list.length ? list.map((f, i) => html`<div class="kv filter-kv ${f.enabled ? '' : 'off'}" data-fid="${f.id}">
+        <label class="switch-wrap" data-tip="${f.enabled ? 'On' : 'Off'}"><input type="checkbox" class="switch" data-ftoggle="${f.id}" ${f.enabled ? raw('checked') : ''} aria-label="Filter on"></label>
+        <div class="v">${describe(f)}<br><span class="muted small">${f.hits ? `Used ${plural(f.hits, 'time')}, last ${ago(f.last_hit)}` : 'Not used yet'}</span></div>
+        <div class="row-acts">
+          <button class="icon-btn" data-fup="${i}" data-tip="Move up" aria-label="Move up" ${i === 0 ? raw('disabled') : ''}>${icon('arrow_upward')}</button>
+          <button class="icon-btn" data-fdown="${i}" data-tip="Move down" aria-label="Move down" ${i === list.length - 1 ? raw('disabled') : ''}>${icon('arrow_downward')}</button>
+          <button class="icon-btn" data-fedit2="${f.id}" data-tip="Edit" aria-label="Edit filter">${icon('edit')}</button>
+          <button class="icon-btn" data-fdel2="${f.id}" data-tip="Delete" aria-label="Delete filter">${icon('delete')}</button>
+        </div>
+      </div>`) : html`<p class="muted" style="margin:14px 0">No filters yet. Tip: open a message and choose <b>Filter messages like this</b> from its menu.</p>`);
+    const byId = (id) => list.find((x) => x.id === +id);
+    box.querySelectorAll('[data-ftoggle]').forEach((c) => (c.onchange = async () => {
+      const f = byId(c.dataset.ftoggle);
+      try { await api(`/filters/${f.id}`, { method: 'PUT', body: { ...f, enabled: c.checked } }); loadFilters(); } catch (e) { c.checked = !c.checked; toastError(e); }
+    }));
+    box.querySelectorAll('[data-fedit2]').forEach((b) => (b.onclick = () => filterDialog(byId(b.dataset.fedit2)).then((x) => x && loadFilters())));
+    box.querySelectorAll('[data-fdel2]').forEach((b) => (b.onclick = async () => {
+      if (!(await confirmDialog('Delete this filter?', 'Mail it already sorted stays where it is.', 'Delete', true))) return;
+      try { await api(`/filters/${b.dataset.fdel2}`, { method: 'DELETE' }); loadFilters(); } catch (e) { toastError(e); }
+    }));
+    const reorder = async (from, to) => {
+      const ids = list.map((x) => x.id);
+      [ids[from], ids[to]] = [ids[to], ids[from]];
+      try { await api('/filters/order', { method: 'POST', body: { ids } }); loadFilters(); } catch (e) { toastError(e); }
+    };
+    box.querySelectorAll('[data-fup]').forEach((b) => (b.onclick = () => reorder(+b.dataset.fup, +b.dataset.fup - 1)));
+    box.querySelectorAll('[data-fdown]').forEach((b) => (b.onclick = () => reorder(+b.dataset.fdown, +b.dataset.fdown + 1)));
+  };
+  $('#add-filter').onclick = () => filterDialog().then((x) => x && loadFilters());
+
+  const loadSenders = async () => {
+    let list;
+    try { list = await api('/senders'); } catch (e) { return toastError(e); }
+    const box = $('#sender-list');
+    if (!box) return;
+    const group = (kind, title) => {
+      const items = list.filter((x) => x.kind === kind);
+      return html`<h3 class="sender-h">${icon(kind === 'block' ? 'block' : 'verified_user', 's')}${title} <span class="muted small">(${items.length})</span></h3>
+        ${items.length ? html`<div class="chips sender-chips">${items.map((x) => html`<span class="chip on sender-chip">${x.pattern.startsWith('@') ? html`<span class="muted">everyone at</span> ${x.pattern.slice(1)}` : x.pattern}
+          <button class="icon-btn sm" data-unlist="${x.pattern}" aria-label="Remove ${x.pattern}" data-tip="Remove">${icon('close')}</button></span>`)}</div>`
+          : html`<p class="muted small" style="margin:4px 0 12px">Nobody yet.</p>`}`;
+    };
+    setHTML(box, html`${group('block', 'Blocked')}${group('allow', 'Always allowed')}`);
+    box.querySelectorAll('[data-unlist]').forEach((b) => (b.onclick = async () => { if (await unlistSender(b.dataset.unlist)) loadSenders(); }));
+  };
+  $('#sender-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const btn = f.querySelector('[type=submit]');
+    btn.classList.add('busy');
+    try {
+      await api('/senders', { method: 'POST', body: { pattern: f.pattern.value, kind: f.kind.value } });
+      f.pattern.value = '';
+      snack(f.kind.value === 'block' ? 'Blocked' : 'Added to always allowed');
+      loadSenders();
+    } catch (er) { toastError(er); } finally { btn.classList.remove('busy'); }
+  };
+  loadFolderList();
+  loadFolders(); // fresh message counts (the event above repaints)
+  loadFilters();
+  loadSenders();
+}
+
 // ---------------------------------------------------------------- out of office
 const toDateInput = (ms) => (ms ? new Date(ms - new Date(ms).getTimezoneOffset() * 60000).toISOString().slice(0, 10) : '');
 const fromDateInput = (s, endOfDay) => {
@@ -242,22 +456,66 @@ async function vacation(pane) {
 
 // ---------------------------------------------------------------- email apps
 function apps(pane) {
-  const host = S.me.org.hostname;
-  const row = (k, v, copy) => html`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span>${copy ? html`<button class="icon-btn sm" data-copy="${v}" data-tip="Copy" aria-label="Copy">${icon('content_copy')}</button>` : ''}</div>`;
+  setHTML(pane, html`<div class="section"><p class="muted">Loading…</p></div>`);
+  api('/mail-apps').then((info) => {
+    if (!pane.isConnected) return;
+    renderApps(pane, info);
+  }).catch((e) => { if (pane.isConnected) setHTML(pane, html`<div class="section"><p class="form-err">${e.message}</p></div>`); });
+}
+
+function renderApps(pane, info) {
+  const host = info.host;
+  const row = (k, v, copy) => html`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span>${copy ? html`<button class="icon-btn sm" data-copy="${copy}" data-tip="Copy" aria-label="Copy ${k}">${icon('content_copy')}</button>` : ''}</div>`;
+  const ports = (ssl, starttls) => [ssl && `${ssl} (SSL/TLS)`, starttls && `${starttls} (STARTTLS)`].filter(Boolean).join('  or  ');
+  const imapOn = !!(info.imap_ssl || info.imap_starttls);
+  const smtpOn = !!(info.smtp_ssl || info.smtp_starttls);
+  const selfSigned = info.tls_mode === 'self-signed';
   setHTML(pane, html`
     <div class="section">
-      <h2>Send from other apps</h2>
-      <p class="lead">Printers, scanners, websites and scripts can send mail as you through these settings. Use your full email address and password.</p>
-      <div class="panel">
-        ${row('Server', host, true)}
-        ${row('Port', '587 (STARTTLS)  or  465 (SSL/TLS)')}
-        ${row('Username', S.me.user.email, true)}
-        ${row('Password', 'Your Skien Mails password')}
-        ${row('Authentication', 'Normal password (PLAIN / LOGIN)')}
-      </div>
+      <h2>Use Outlook, Apple Mail, Thunderbird or your phone</h2>
+      <p class="lead">Add your Skien Mails account to any mail app that supports IMAP. Mail, folders, read status and stars stay in sync with this web app.</p>
+      ${selfSigned ? html`<div class="banner warn" role="note">${icon('warning', 's')}<span class="grow">This server doesn't have a trusted security certificate yet, so mail apps will show a warning or refuse to connect. Ask your administrator to set one up.</span></div>` : ''}
+      ${imapOn ? '' : html`
+        <div class="banner" role="note">${icon('info', 's')}<span class="grow">Mail-app access (IMAP) isn't turned on for this server. Ask your administrator. You can still send from other apps with the settings below.</span></div>`}
     </div>
+    ${imapOn ? html`
     <div class="section">
-      <h2>Read mail on your phone and computer</h2>
+      <h2>Incoming mail (IMAP)</h2>
+        <div class="panel">
+          ${row('Server', host, host)}
+          ${row('Port', ports(info.imap_ssl, info.imap_starttls))}
+          ${row('Username', info.username, info.username)}
+          ${row('Password', 'Your Skien Mails password')}
+        </div>
+    </div>` : ''}
+    ${smtpOn ? html`
+    <div class="section">
+      <h2>Outgoing mail (SMTP)</h2>
+      <p class="lead">Mail apps, printers, scanners, websites and scripts send as you with these settings.</p>
+      <div class="panel">
+        ${row('Server', host, host)}
+        ${row('Port', ports(info.smtp_ssl, info.smtp_starttls))}
+        ${row('Username', info.username, info.username)}
+        ${row('Password', 'Your Skien Mails password')}
+        ${row('Authentication', 'Required · normal password')}
+      </div>
+    </div>` : ''}
+    ${imapOn ? html`
+    <div class="section">
+      <h2>Adding the account</h2>
+      <div class="panel" style="padding:16px 20px">
+        <ul class="apps-steps">
+          <li><b>iPhone and iPad</b> — Settings → Apps → Mail → Mail Accounts → Add Account → Other → Add Mail Account. Choose <b>IMAP</b> and enter the settings above for both incoming and outgoing mail.</li>
+          <li><b>Android (Gmail app)</b> — tap your profile picture → Add another account → Other. Choose <b>Personal (IMAP)</b>, then enter the settings above.</li>
+          <li><b>Outlook</b> — Add account and type your email address. If Outlook doesn't find the settings itself, choose <b>IMAP</b> and enter the settings above.</li>
+          <li><b>Apple Mail on Mac</b> — Mail → Add Account → Other Mail Account. If it can't find the server, enter the settings above.</li>
+          <li><b>Thunderbird</b> — Add a mail account, then choose <b>Configure manually</b> and enter the settings above.</li>
+        </ul>
+        <p class="muted small" style="margin-bottom:0">Good to know: deleting a message in a mail app moves it to Trash here. Drafts saved in a mail app stay in that app's Drafts folder, and drafts started here stay here. If you change your password, mail apps ask for the new one.</p>
+      </div>
+    </div>` : ''}
+    <div class="section">
+      <h2>Or install Skien Mails as an app</h2>
       <div class="panel" style="padding:16px 20px">
         <p class="mt0">Open <b>https://${host}</b> and install Skien Mails as an app — it works on Windows, macOS, Android and iPhone, stays signed in, and shows new-mail notifications.</p>
         <a class="btn tonal" href="#/settings/general">${icon('install_desktop')}Install options</a>
@@ -277,6 +535,7 @@ const PROVIDERS = [
 ];
 const REGIONS = [{ value: 'in', label: 'India (zoho.in)' }, { value: 'com', label: 'United States (zoho.com)' }, { value: 'eu', label: 'Europe (zoho.eu)' }];
 const TARGETS = [
+  { value: 'keep', label: 'A folder with the same name' },
   { value: 'inbox', label: 'Inbox' }, { value: 'archive', label: 'Archive' }, { value: 'sent', label: 'Sent' },
   { value: 'spam', label: 'Spam' }, { value: 'trash', label: 'Trash' }, { value: 'skip', label: 'Don\u2019t import' },
 ];
@@ -343,7 +602,13 @@ function importMail(pane) {
       <h2>Your imports</h2>
       <p class="lead">Imports keep running if you close this page. Running one again is safe — messages already in your mailbox are skipped.</p>
       <div id="imp-jobs"></div>
+    </div>
+    <div class="section">
+      <h2>Export your mail</h2>
+      <p class="lead">Download a copy of your mail as a .zip: one folder per mail folder, one .eml file per message. It opens in Outlook, Apple Mail or Thunderbird, and can be imported into Skien Mails or another service.</p>
+      <div class="panel" style="padding:12px 20px" id="exp-panel"><div class="center-fill" style="padding:16px"><div class="spinner"></div></div></div>
     </div>`);
+  loadExport();
 
   // ---- account form
   const form = $('#imp-form');
@@ -379,7 +644,7 @@ function importMail(pane) {
     if (!folders.length) { impErr.textContent = 'No folders were found in that account.'; return; }
     form.querySelectorAll('input, select, button').forEach((x) => (x.disabled = true));
     setHTML(box, html`
-      <div class="imp-ok">${icon('check_circle', 's')}<span>Connected to <b>${form.host.value}</b>. Choose where each folder goes — folders that aren't Inbox, Sent, Spam or Trash go to Archive.</span></div>
+      <div class="imp-ok">${icon('check_circle', 's')}<span>Connected to <b>${form.host.value}</b>. Choose where each folder goes — your own folders are recreated here with the same names.</span></div>
       <div class="imp-folders">${folders.map((f, i) => html`
         <div class="imp-folder">
           <span class="nm" dir="auto">${icon(f.target === 'skip' ? 'remove' : 'folder_zip', 's')}<span>${f.name}</span></span>
@@ -411,7 +676,7 @@ function importMail(pane) {
       btn.classList.add('busy');
       err2.textContent = '';
       try {
-        const chosen = [...box.querySelectorAll('select[data-i]')].map((sel) => ({ name: folders[+sel.dataset.i].name, target: sel.value }));
+        const chosen = [...box.querySelectorAll('select[data-i]')].map((sel) => ({ name: folders[+sel.dataset.i].name, delim: folders[+sel.dataset.i].delim || '', target: sel.value }));
         await api('/import/imap', { method: 'POST', body: { ...source(), folders: chosen } });
         form.password.value = ''; // not kept anywhere once the import has started
         box.hidden = true;

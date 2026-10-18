@@ -69,6 +69,17 @@ func CanonicalFlag(flag string) string {
 	return strings.ToLower(flag)
 }
 
+// CanonicalFlagKeepCase is CanonicalFlag for servers: RFC 3501 flags get their canonical case,
+// keywords keep the case the client used (mail apps compare some of them case-sensitively).
+func CanonicalFlagKeepCase(flag string) string {
+	for _, f := range flags {
+		if strings.EqualFold(f, flag) {
+			return f
+		}
+	}
+	return flag
+}
+
 func ParseParamList(fields []interface{}) (map[string]string, error) {
 	params := make(map[string]string)
 

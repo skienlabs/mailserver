@@ -39,7 +39,8 @@ type Conn interface {
 	Info() *imap.ConnInfo
 
 	setTLSConn(*tls.Conn)
-	silent() *bool // TODO: remove this
+	authenticated() // Skien Mails patch: raise the pre-sign-in limits
+	silent() *bool  // TODO: remove this
 	serve(Conn) error
 	commandHandler(cmd *imap.Command) (hdlr Handler, err error)
 }
@@ -72,6 +73,49 @@ type conn struct {
 	responses chan imap.WriterTo
 	loggedOut chan struct{}
 	silentVal bool
+
+	preAuthUntil time.Time // Skien Mails patch: fixed deadline for signing in
+	litReserved  int64     // Skien Mails patch: this connection's share of Server.LiteralBudget
+	litUser      string
+}
+
+var errLiteralBusy = errors.New("[LIMIT] The server is busy receiving other messages. Try again shortly.")
+
+// literalRate is the slowest upload speed allowed while a literal holds memory.
+const literalRate = 128 << 10 // bytes per second
+
+func (c *conn) reserveLiteral(n uint32) error {
+	user := ""
+	if c.ctx.User != nil {
+		user = c.ctx.User.Username()
+	}
+	if c.litReserved > 0 && user != c.litUser {
+		c.releaseLiterals() // can't happen within one command, but never mix accounts
+	}
+	if !c.s.LiteralBudget.reserve(user, int64(n)) {
+		return errLiteralBusy
+	}
+	c.litReserved += int64(n)
+	c.litUser = user
+	// A stalled upload mustn't hold memory for long: a minute plus time at a slow rate. Before
+	// sign-in the fixed sign-in deadline still applies if it's sooner.
+	grace := c.s.LiteralBudget.Grace
+	if grace <= 0 {
+		grace = time.Minute
+	}
+	dl := time.Now().Add(grace + time.Duration(int64(n)/literalRate)*time.Second)
+	if !c.preAuthUntil.IsZero() && (c.ctx.State == imap.ConnectingState || c.ctx.State == imap.NotAuthenticatedState) && c.preAuthUntil.Before(dl) {
+		dl = c.preAuthUntil
+	}
+	c.Conn.SetDeadline(dl)
+	return nil
+}
+
+func (c *conn) releaseLiterals() {
+	if c.litReserved > 0 {
+		c.s.LiteralBudget.release(c.litUser, c.litReserved)
+		c.litReserved = 0
+	}
 }
 
 func newConn(s *Server, c net.Conn) *conn {
@@ -101,6 +145,12 @@ func newConn(s *Server, c net.Conn) *conn {
 		loggedOut: loggedOut,
 	}
 
+	if s.PreAuthTimeout > 0 {
+		conn.preAuthUntil = time.Now().Add(s.PreAuthTimeout)
+	}
+	if s.LiteralBudget != nil {
+		conn.Conn.Reader.ReserveLiteral = conn.reserveLiteral
+	}
 	if s.Debug != nil {
 		conn.Conn.SetDebug(s.Debug)
 	}
@@ -132,7 +182,22 @@ func (r *response) WriteTo(w *imap.Writer) error {
 	return err
 }
 
+func (c *conn) authenticated() {
+	if c.s.MaxLiteralSizeAuthed > 0 {
+		c.Conn.MaxLiteralSize = c.s.MaxLiteralSizeAuthed
+	}
+}
+
 func (c *conn) setDeadline() {
+	if c.s.PreAuthTimeout > 0 && (c.ctx.State == imap.ConnectingState || c.ctx.State == imap.NotAuthenticatedState) {
+		// A fixed time from connecting, not renewed by commands: a client that keeps
+		// sending NOOP without signing in is still cut off.
+		if c.preAuthUntil.IsZero() {
+			c.preAuthUntil = time.Now().Add(c.s.PreAuthTimeout)
+		}
+		c.Conn.SetDeadline(c.preAuthUntil)
+		return
+	}
 	if c.s.AutoLogout == 0 {
 		return
 	}
@@ -153,6 +218,8 @@ func (c *conn) WriteResp(r imap.WriterTo) error {
 	c.setDeadline()
 	return nil
 }
+
+func (c *conn) closeNet() error { return c.Conn.Conn.Close() }
 
 func (c *conn) Close() error {
 	if c.ctx.User != nil {
@@ -288,6 +355,7 @@ func (c *conn) serve(conn Conn) (err error) {
 	defer func() {
 		c.ctx.State = imap.LogoutState
 		close(c.loggedOut)
+		c.releaseLiterals()
 	}()
 
 	defer func() {
@@ -317,6 +385,7 @@ func (c *conn) serve(conn Conn) (err error) {
 		var res *imap.StatusResp
 		var up Upgrader
 
+		c.releaseLiterals() // the previous command is done with its literals
 		fields, err := c.ReadLine()
 		if err == io.EOF || c.ctx.State == imap.LogoutState {
 			return nil
@@ -328,6 +397,13 @@ func (c *conn) serve(conn Conn) (err error) {
 				res = &imap.StatusResp{
 					Type: imap.StatusRespBad,
 					Info: err.Error(),
+				}
+				// Skien Mails patch: answer with the command's tag when it was read (e.g. a
+				// refused literal), so the client isn't left waiting for its reply.
+				if len(fields) > 0 {
+					if tag, ok := fields[0].(string); ok && tag != "" && len(tag) <= 64 && tag != "*" && tag != "+" {
+						res.Tag = tag
+					}
 				}
 			} else {
 				c.s.ErrorLog.Println("cannot read command:", err)
@@ -353,6 +429,8 @@ func (c *conn) serve(conn Conn) (err error) {
 				}
 			}
 		}
+
+		c.releaseLiterals() // the command is done with its literals before its reply goes out
 
 		if res != nil {
 

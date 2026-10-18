@@ -73,7 +73,7 @@ func (cmd *Append) Parse(fields []interface{}) (err error) {
 			}
 
 			for i, flag := range cmd.Flags {
-				cmd.Flags[i] = imap.CanonicalFlag(flag)
+				cmd.Flags[i] = imap.CanonicalFlagKeepCase(flag)
 			}
 
 			fields = fields[1:]

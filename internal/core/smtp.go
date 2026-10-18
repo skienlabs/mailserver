@@ -369,8 +369,12 @@ func (s *session) dataInbound(raw []byte) error {
 
 	full := 0
 	delivered := 0
+	toSpam := 0
 	for _, uid := range s.userIDs {
-		_, err := s.a.Deliver(uid, final, DeliverOpts{Folder: folder, SpamScore: v.Score, AuthSummary: v.Summary, Meta: &meta, Notify: folder == "inbox", EnforceQuota: true})
+		// Each person's blocked/allowed senders and filters decide where their copy goes.
+		arr := s.a.decideArrival(uid, &meta, s.localRcpts, folder, v.FromAuth)
+		_, err := s.a.Deliver(uid, final, DeliverOpts{Folder: arr.Folder, Seen: arr.Seen, Flagged: arr.Flagged, SpamScore: v.Score, AuthSummary: v.Summary,
+			Meta: &meta, Notify: arr.Folder == "inbox" && !arr.Seen, EnforceQuota: true})
 		if errors.Is(err, ErrQuota) {
 			full++ // a group member over quota: skipped (no bounce to a possibly forged sender)
 			continue
@@ -383,7 +387,9 @@ func (s *session) dataInbound(raw []byte) error {
 			continue
 		}
 		delivered++
-		if folder == "inbox" {
+		if arr.Folder == "spam" {
+			toSpam++
+		} else if arr.Folder != "trash" {
 			s.a.maybeVacation(uid, s.from, &meta)
 		}
 	}
@@ -392,7 +398,7 @@ func (s *session) dataInbound(raw []byte) error {
 		return smtpErr(452, smtp.EnhancedCode{4, 2, 2}, "Mailbox full, try again later")
 	}
 	status := "delivered"
-	if folder == "spam" {
+	if folder == "spam" || toSpam == delivered {
 		status = "spam"
 	}
 	s.a.logMail("in", s.from, rcptList, meta.Subject, status, v.Summary, s.ip.String())

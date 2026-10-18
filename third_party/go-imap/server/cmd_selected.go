@@ -50,9 +50,15 @@ func (cmd *Close) Handle(conn Conn) error {
 	}
 
 	mailbox := ctx.Mailbox
+	readOnly := ctx.MailboxReadOnly
+	unbindMailbox(mailbox) // Skien Mails patch
 	ctx.Mailbox = nil
 	ctx.MailboxReadOnly = false
 
+	// RFC 3501 6.4.2: CLOSE on a mailbox opened with EXAMINE removes nothing (Skien Mails patch).
+	if readOnly {
+		return nil
+	}
 	// No need to send expunge updates here, since the mailbox is already unselected
 	return mailbox.Expunge()
 }
@@ -68,6 +74,10 @@ func (cmd *Expunge) Handle(conn Conn) error {
 	}
 	if ctx.MailboxReadOnly {
 		return ErrMailboxReadOnly
+	}
+	// Skien Mails patch: the mailbox expunges and reports in one step.
+	if r, ok := ctx.Mailbox.(backend.ExpungeReporter); ok {
+		return r.ExpungeAndReport()
 	}
 
 	// Get a list of messages that will be deleted
@@ -235,7 +245,7 @@ func (cmd *Store) handle(uid bool, conn Conn) error {
 		}
 	}
 	for i, flag := range flags {
-		flags[i] = imap.CanonicalFlag(flag)
+		flags[i] = imap.CanonicalFlagKeepCase(flag)
 	}
 
 	// If the backend supports message updates, this will prevent this connection

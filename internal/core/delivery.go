@@ -78,7 +78,12 @@ func (a *App) Submit(r SubmitReq) error {
 		local := append([]byte(fmt.Sprintf("Return-Path: <%s>\r\n", sanitizeHeaderValue(r.EnvFrom))), r.Raw...)
 		failures := map[string]string{}
 		for _, uid := range localIDs {
-			_, err := a.Deliver(uid, local, DeliverOpts{Folder: "inbox", Meta: r.Meta, Notify: true, EnforceQuota: true, AuthSummary: "internal"})
+			arr := arrival{Folder: "inbox"}
+			if r.Via != "system" {
+				arr = a.decideArrival(uid, r.Meta, localAddrs, "inbox", true)
+			}
+			_, err := a.Deliver(uid, local, DeliverOpts{Folder: arr.Folder, Seen: arr.Seen, Flagged: arr.Flagged, Meta: r.Meta,
+				Notify: arr.Folder == "inbox" && !arr.Seen, EnforceQuota: true, AuthSummary: "internal"})
 			if err != nil {
 				reason := "451 4.3.0 local delivery failed"
 				if errors.Is(err, ErrQuota) {
@@ -90,7 +95,7 @@ func (a *App) Submit(r SubmitReq) error {
 				a.Log.Error("local delivery", "user", uid, "err", err)
 				continue
 			}
-			if r.Via != "system" {
+			if r.Via != "system" && arr.Folder != "spam" && arr.Folder != "trash" {
 				a.maybeVacation(uid, r.EnvFrom, r.Meta)
 			}
 		}

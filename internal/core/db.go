@@ -271,6 +271,96 @@ CREATE INDEX queue_attempts_q  ON queue_attempts(queue_id, at);
 CREATE INDEX queue_attempts_at ON queue_attempts(at, result);
 CREATE INDEX queue_rcpts_upd   ON queue_rcpts(updated_at);
 `,
+	// 6 (1.1.0): custom folders, filters, blocked/allowed senders, mail-app (IMAP) state, push.
+	// Messages in a custom folder have folder = 'f:<id>'.
+	`
+CREATE TABLE user_folders (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  UNIQUE (user_id, name COLLATE NOCASE)
+);
+
+CREATE TABLE filters (
+  id            INTEGER PRIMARY KEY,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  position      INTEGER NOT NULL DEFAULT 0,
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  match_from    TEXT NOT NULL DEFAULT '',
+  match_to      TEXT NOT NULL DEFAULT '',
+  match_subject TEXT NOT NULL DEFAULT '',
+  match_words   TEXT NOT NULL DEFAULT '',
+  action_folder TEXT NOT NULL DEFAULT '',
+  mark_read     INTEGER NOT NULL DEFAULT 0,
+  star          INTEGER NOT NULL DEFAULT 0,
+  hits          INTEGER NOT NULL DEFAULT 0,
+  last_hit      INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX filters_user ON filters(user_id, position, id);
+
+CREATE TABLE sender_lists (
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pattern    TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, pattern)
+) WITHOUT ROWID;
+
+CREATE TABLE imap_folders (
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  folder      TEXT NOT NULL,
+  uidvalidity INTEGER NOT NULL,
+  uidnext     INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (user_id, folder)
+) WITHOUT ROWID;
+
+CREATE TABLE imap_uids (
+  user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  folder   TEXT NOT NULL,
+  uid      INTEGER NOT NULL,
+  msg_id   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE, -- ids can be reused after deletes
+  deleted  INTEGER NOT NULL DEFAULT 0,
+  keywords TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (user_id, folder, uid)
+) WITHOUT ROWID;
+CREATE INDEX imap_uids_msg ON imap_uids(msg_id);
+CREATE UNIQUE INDEX imap_uids_fmsg ON imap_uids(user_id, folder, msg_id);
+
+CREATE TABLE imap_drafts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused, so a stale mail-app view can't hit another draft
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  uid         INTEGER NOT NULL,
+  blob        TEXT NOT NULL,
+  size        INTEGER NOT NULL,
+  received_at INTEGER NOT NULL,
+  seen        INTEGER NOT NULL DEFAULT 1,
+  flagged     INTEGER NOT NULL DEFAULT 0,
+  answered    INTEGER NOT NULL DEFAULT 0,
+  deleted     INTEGER NOT NULL DEFAULT 0,
+  keywords    TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX imap_drafts_uid ON imap_drafts(user_id, uid);
+
+-- Web Push subscriptions (one per browser/device). Tied to the sign-in session that made it,
+-- so signing out, a password change or a disabled account stops notifications on that device.
+CREATE TABLE push_subs (
+  id         INTEGER PRIMARY KEY,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  endpoint   TEXT NOT NULL UNIQUE,
+  p256dh     TEXT NOT NULL,
+  auth       TEXT NOT NULL,
+  label      TEXT NOT NULL DEFAULT '',
+  preview    INTEGER NOT NULL DEFAULT 1, -- show sender and subject
+  created_at INTEGER NOT NULL,
+  last_ok    INTEGER NOT NULL DEFAULT 0,
+  last_err   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX push_subs_user ON push_subs(user_id);
+CREATE INDEX push_subs_session ON push_subs(session_id);
+`,
 }
 
 // OpenDB opens (and migrates) the SQLite database in dataDir.

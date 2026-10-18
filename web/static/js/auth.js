@@ -1,6 +1,7 @@
 // Sign-in, first-run organisation setup, and forced password change screens.
 import { $, html, icon, setHTML, api, field, passwordToggle, snack, dialog } from './lib.js';
 import { setTheme } from './state.js';
+import { beforeSignOut } from './push.js';
 
 function themeToggle() {
   return html`<button type="button" id="auth-theme">${icon('dark_mode', 's')} Theme</button>`;
@@ -212,7 +213,7 @@ export function renderForceChange(root, me, done) {
   passwordToggle(root);
   const form = $('#pw', root);
   $('#signout', root).onclick = async () => {
-    try { await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
+    try { await beforeSignOut(); await api('/auth/logout', { method: 'POST' }); } catch { /* ignore */ }
     renderLogin(root, done);
   };
   form.onsubmit = async (e) => {

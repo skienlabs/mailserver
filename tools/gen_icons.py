@@ -15,8 +15,10 @@ format_list_numbered link format_quote format_clear remove open_in_full close_fu
 all_inbox beach_access lock key devices upload keyboard install_desktop contacts dashboard outbox description
 picture_as_pdf folder_zip insert_drive_file shield account_circle badge verified_user undo filter_list
 desktop_windows phone_iphone language notifications move_to_inbox unfold_more south_west north_east report_off
-mail_outline alternate_email domain storage speed bolt cloud_off sync_alt""".split()
-FILLED = "inbox star send archive report delete drafts insert_drive_file all_inbox contacts dashboard person group dns schedule receipt_long tune settings check_circle error warning".split()
+mail_outline alternate_email domain storage speed bolt cloud_off sync_alt
+folder create_new_folder drive_file_move filter_alt block notifications_active arrow_upward arrow_downward
+smartphone ios_share""".split()
+FILLED = "inbox star send archive report delete drafts insert_drive_file all_inbox contacts dashboard person group dns schedule receipt_long tune settings check_circle error warning folder".split()
 
 root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "package")
 syms = []

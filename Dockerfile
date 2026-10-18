@@ -19,7 +19,7 @@ RUN setcap cap_net_bind_service=+ep /usr/local/bin/skienmail && apk del libcap
 USER skienmail
 ENV SM_DATA_DIR=/data
 VOLUME ["/data"]
-EXPOSE 25 465 587 8080
+EXPOSE 25 143 465 587 993 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/skienmail"]

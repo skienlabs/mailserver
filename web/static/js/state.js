@@ -3,6 +3,7 @@ import { bus, api, people } from './lib.js';
 
 export const S = {
   me: null,          // /api/me payload
+  folders: [],       // the user's own folders: [{id, key: 'f:12', name: 'Clients/Acme', leaf, depth, unread, total}]
   counts: {},        // unread counts per folder
   route: {},         // parsed location.hash
   installPrompt: null,
@@ -20,7 +21,17 @@ export const FOLDERS = [
   { id: 'trash', name: 'Trash', icon: 'delete' },
   { id: 'all', name: 'All mail', icon: 'all_inbox' },
 ];
-export const folderName = (id) => FOLDERS.find((f) => f.id === id)?.name || 'Mail';
+export const isCustom = (id) => /^f:[1-9][0-9]{0,17}$/.test(id || '');
+const customFolder = (id) => (S.folders || []).find((f) => f.key === id);
+export const folderName = (id) => FOLDERS.find((f) => f.id === id)?.name || (isCustom(id) ? customFolder(id)?.leaf || 'Folder' : 'Mail');
+export const folderPath = (id) => (isCustom(id) ? customFolder(id)?.name || 'Folder' : folderName(id));
+
+export async function loadFolders() {
+  try {
+    S.folders = await api('/user-folders', { background: true });
+    bus.emit('folders');
+  } catch { /* keep the last list */ }
+}
 
 export function navigate(hash, { replace = false } = {}) {
   if (location.hash === hash) { bus.emit('route'); return; }
@@ -45,7 +56,7 @@ export function parseRoute() {
   if (parts[0] === 'people') return { name: 'people', params };
   if (parts[0] === 'compose') return { name: 'compose', params };
   if (parts[0] === 'drafts') return { name: 'drafts', folder: 'drafts', page, params };
-  if (FOLDERS.some((f) => f.id === parts[0])) {
+  if (FOLDERS.some((f) => f.id === parts[0]) || isCustom(parts[0])) {
     if (parts[1] === 't') return { name: 'thread', folder: parts[0], id: +parts[2], params };
     return { name: 'list', folder: parts[0], page, filter: params.get('f') || '', params };
   }

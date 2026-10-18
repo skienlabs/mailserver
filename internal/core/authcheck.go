@@ -27,7 +27,13 @@ type InboundVerdict struct {
 	Quarantine bool
 	Header     string // Authentication-Results value
 	Summary    string
+	// FromAuth: the From domain itself is vouched for (SPF or DKIM passes in alignment with it)
+	// and DMARC doesn't fail. "Always allow" only rescues such mail from Spam.
+	FromAuth bool
 }
+
+// dkimLookupTXT replaces DNS for DKIM keys in tests (nil = real DNS).
+var dkimLookupTXT func(domain string) ([]string, error)
 
 func orgDomain(d string) string {
 	d = strings.ToLower(strings.TrimSuffix(d, "."))
@@ -119,7 +125,7 @@ func (a *App) CheckInbound(ip net.IP, helo, mailFrom string, raw []byte, meta *M
 	_, mailFromDomain, _ := SplitAddress(sender)
 
 	// --- DKIM
-	verifs, _ := dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{MaxVerifications: 5})
+	verifs, _ := dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{MaxVerifications: 5, LookupTXT: dkimLookupTXT})
 	var dkimPass []string
 	dkimFail := false
 	for _, vf := range verifs {
@@ -144,6 +150,14 @@ func (a *App) CheckInbound(ip net.IP, helo, mailFrom string, raw []byte, meta *M
 
 	// --- DMARC
 	_, fromDomain, _ := SplitAddress(meta.From.Email)
+	if fromDomain != "" {
+		v.FromAuth = spfRes == spf.Pass && aligned(mailFromDomain, fromDomain, dmarc.AlignmentRelaxed)
+		for _, d := range dkimPass {
+			if aligned(d, fromDomain, dmarc.AlignmentRelaxed) {
+				v.FromAuth = true
+			}
+		}
+	}
 	v.DMARC = "none"
 	if fromDomain != "" {
 		if rec, sub := lookupDMARC(fromDomain); rec != nil {
@@ -236,6 +250,9 @@ func (a *App) CheckInbound(ip net.IP, helo, mailFrom string, raw []byte, meta *M
 	}
 	v.Header = authres.Format(a.Hostname(), results)
 	v.Summary = fmt.Sprintf("spf=%s dkim=%s dmarc=%s", v.SPF, v.DKIM, v.DMARC)
+	if v.DMARC == "fail" {
+		v.FromAuth = false
+	}
 	if len(v.Reasons) > 0 {
 		v.Summary += "; " + strings.Join(v.Reasons, ", ")
 	}

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"archive/zip"
 
@@ -68,6 +69,7 @@ type importRun struct {
 	mu        sync.Mutex
 	job       ImportJob
 	userID    int64
+	folders   map[string]string // "keep:<path>" / custom key -> folder key to store in (cache)
 	cancel    context.CancelFunc
 	cancelled bool // by the user (vs. server shutdown)
 	lastSave  time.Time
@@ -309,9 +311,7 @@ func (a *App) importOne(u *User, r *importRun, mine map[string]bool, m importMsg
 	if folder == "inbox" && mine[strings.ToLower(meta.From.Email)] {
 		folder = "sent" // something this person sent, found among received mail (e.g. a mixed export)
 	}
-	if !realFolders[folder] {
-		folder = "archive"
-	}
+	folder = a.importTargetFolder(u.ID, r, folder)
 	seen := m.seen || folder == "sent"
 	received := m.received
 	if received.IsZero() || received.Year() < 1980 {
@@ -402,8 +402,9 @@ type IMAPSource struct {
 // IMAPFolder is one folder on the source server and where its mail goes.
 type IMAPFolder struct {
 	Name     string `json:"name"`
+	Delim    string `json:"delim,omitempty"`
 	Messages int    `json:"messages"`
-	Target   string `json:"target"` // inbox | archive | sent | spam | trash | skip
+	Target   string `json:"target"` // inbox | archive | sent | spam | trash | skip | keep (a folder of the same name) | f:<id>
 }
 
 func (s *IMAPSource) normalize(anyPort bool) error {
@@ -597,7 +598,7 @@ func imapListFolders(ic *imapConn) ([]IMAPFolder, error) {
 		if hasAttr(mi.Attributes, imap.NoSelectAttr) || hasAttr(mi.Attributes, "\\NonExistent") {
 			continue
 		}
-		f := IMAPFolder{Name: mi.Name, Target: suggestTarget(mi.Name, mi.Delimiter, mi.Attributes)}
+		f := IMAPFolder{Name: mi.Name, Delim: mi.Delimiter, Target: suggestTarget(mi.Name, mi.Delimiter, mi.Attributes)}
 		ic.guard.resetBudget(1 << 20)
 		if st, err := c.Status(mi.Name, []imap.StatusItem{imap.StatusMessages}); err == nil {
 			f.Messages = int(st.Messages)
@@ -652,6 +653,8 @@ func suggestTarget(name, delim string, attrs []string) string {
 		return "skip"
 	case hasAttr(attrs, imap.AllAttr), hasAttr(attrs, imap.ArchiveAttr):
 		return "archive"
+	case hasAttr(attrs, imap.FlaggedAttr), hasAttr(attrs, "\\Important"):
+		return "skip" // Gmail's Starred / Important: copies of mail in other folders
 	}
 	leaf := strings.ToLower(name)
 	if delim != "" {
@@ -668,8 +671,81 @@ func suggestTarget(name, delim string, attrs []string) string {
 		return "skip"
 	case "spam", "junk", "junk e-mail", "junk email", "bulk mail", "bulk", "trash", "deleted", "deleted items", "deleted messages", "bin":
 		return "skip"
+	case "archive", "archives", "all mail", "starred", "important":
+		if leaf == "starred" || leaf == "important" {
+			return "skip"
+		}
+		return "archive"
 	}
-	return "archive"
+	return "keep"
+}
+
+// importFolderPath turns a source folder name into one of our folder paths: levels joined by
+// "/", a leading INBOX level dropped ("INBOX.Clients" → "Clients"), characters we don't allow
+// in names replaced.
+func importFolderPath(name, delim string) string {
+	if delim == "" {
+		delim = "/"
+	}
+	parts := strings.Split(name, delim)
+	if delim != "/" {
+		for i := range parts {
+			parts[i] = strings.ReplaceAll(parts[i], "/", "-")
+		}
+	}
+	if len(parts) > 1 {
+		if _, reserved := systemFolderNames[strings.ToLower(strings.TrimSpace(parts[0]))]; reserved || strings.EqualFold(strings.TrimSpace(parts[0]), "inbox") {
+			parts = parts[1:]
+		}
+	}
+	for i, p := range parts {
+		parts[i] = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || r == '\\' || r == '%' || r == '*' || r == '"' {
+				return '-'
+			}
+			return r
+		}, p)
+	}
+	return strings.Join(parts, "/")
+}
+
+// importTargetFolder resolves a message's destination: built-in folders as they are, a custom
+// folder key if it still belongs to the user, "keep:<path>" to a folder of that name (created
+// if needed). Anything unusable goes to Archive.
+func (a *App) importTargetFolder(userID int64, r *importRun, folder string) string {
+	if realFolders[folder] {
+		return folder
+	}
+	r.mu.Lock()
+	cached, ok := r.folders[folder]
+	r.mu.Unlock()
+	if ok {
+		return cached
+	}
+	out := "archive"
+	switch {
+	case isCustomFolder(folder):
+		if _, err := a.folderByKey(userID, folder); err == nil {
+			out = folder
+		}
+	case strings.HasPrefix(folder, "keep:"):
+		path := strings.TrimPrefix(folder, "keep:")
+		if t, reserved := systemFolderNames[strings.ToLower(strings.TrimSpace(path))]; reserved && realFolders[t] {
+			out = t
+		} else if clean, err := cleanFolderName(path); err == nil {
+			if f, err := a.ensureFolder(userID, clean); err == nil {
+				out = f.Key
+				a.Events.Publish(userID, Event{Type: "folders"})
+			}
+		}
+	}
+	r.mu.Lock()
+	if r.folders == nil {
+		r.folders = map[string]string{}
+	}
+	r.folders[folder] = out
+	r.mu.Unlock()
+	return out
 }
 
 // ImportIMAP starts importing the chosen folders.
@@ -683,7 +759,15 @@ func (a *App) ImportIMAP(u *User, s IMAPSource, folders []IMAPFolder) (ImportJob
 		if f.Name == "" || f.Target == "skip" {
 			continue
 		}
-		if !realFolders[f.Target] {
+		switch {
+		case realFolders[f.Target]:
+		case f.Target == "keep":
+			f.Target = "keep:" + importFolderPath(f.Name, f.Delim)
+		case isCustomFolder(f.Target):
+			if _, err := a.folderByKey(u.ID, f.Target); err != nil {
+				return ImportJob{}, fmt.Errorf("The folder chosen for %q no longer exists", f.Name)
+			}
+		default:
 			return ImportJob{}, fmt.Errorf("Choose where the mail in %q should go", f.Name)
 		}
 		chosen = append(chosen, f)
@@ -1224,11 +1308,26 @@ func (a *App) importZip(ctx context.Context, r *importRun, file string, o FileIm
 		return errors.New("No emails were found in the .zip file. It should contain .eml files (like a Zoho Mail export) or .mbox files.")
 	}
 	r.update(func(j *ImportJob) { j.Total = total })
+	// Exports often wrap everything in one top folder ("export/Inbox/…"); that level isn't a folder.
+	strip := ""
+	if first, _, ok := strings.Cut(entries[0].Name, "/"); ok {
+		strip = first + "/"
+		for _, zf := range entries {
+			if !strings.HasPrefix(zf.Name, strip) || !strings.Contains(zf.Name[len(strip):], "/") {
+				strip = ""
+				break
+			}
+		}
+	}
 	for _, zf := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		hint := folderHint(path.Dir(zf.Name))
+		name := strings.TrimPrefix(zf.Name, strip)
+		hint := folderHint(path.Dir(name))
+		if low := strings.ToLower(name); strings.HasSuffix(low, ".mbox") || path.Base(low) == "mbox" {
+			hint = mboxHint(name)
+		}
 		lower := strings.ToLower(zf.Name)
 		rc, err := zf.Open()
 		if err != nil {
@@ -1278,25 +1377,48 @@ func fileMsg(raw []byte, tooBig bool, o FileImportOpts, hint string) importMsg {
 	return m
 }
 
-// folderHint maps a folder name inside an archive ("Sent", "Inbox") to one of ours.
+// folderHint maps a folder inside an archive to one of ours: well-known names ("Sent",
+// "Inbox", "Spam"…) to the built-in folders, other folders to a folder of the same name.
 func folderHint(dir string) string {
-	if dir == "." || dir == "" {
+	if dir == "." || dir == "" || dir == "/" {
 		return ""
 	}
-	switch t := suggestTarget(path.Base(dir), "/", nil); t {
-	case "inbox", "sent":
-		return t
-	case "skip":
-		leaf := strings.ToLower(path.Base(dir))
-		switch leaf {
-		case "spam", "junk", "junk e-mail", "junk email", "bulk mail":
-			return "spam"
-		case "trash", "deleted", "deleted items", "deleted messages", "bin":
-			return "trash"
+	if !strings.Contains(dir, "/") {
+		switch t := suggestTarget(dir, "/", nil); t {
+		case "inbox", "sent", "archive":
+			return t
+		case "skip":
+			switch strings.ToLower(strings.TrimSpace(dir)) {
+			case "spam", "junk", "junk e-mail", "junk email", "bulk mail", "bulk":
+				return "spam"
+			case "trash", "deleted", "deleted items", "deleted messages", "bin":
+				return "trash"
+			}
+			return "archive"
 		}
-		return "archive"
 	}
-	return "archive"
+	return "keep:" + importFolderPath(dir, "/")
+}
+
+// mboxHint names the folder for an mbox inside an archive after the mbox itself
+// ("Clients.mbox", or Apple Mail's "Clients.mbox/mbox").
+func mboxHint(name string) string {
+	base := path.Base(name)
+	if strings.EqualFold(base, "mbox") {
+		name = path.Dir(name)
+		base = path.Base(name)
+	}
+	base = strings.TrimSuffix(strings.TrimSuffix(base, ".mbox"), ".MBOX")
+	if strings.HasPrefix(strings.ToLower(base), "all mail") {
+		return "archive" // Google Takeout: labels inside the messages decide
+	}
+	dir := path.Dir(name)
+	if dir == "." {
+		dir = ""
+	} else {
+		dir += "/"
+	}
+	return folderHint(dir + base)
 }
 
 func gmailLabels(v string) (folder string, seen, flagged, skip bool) {
@@ -1327,8 +1449,24 @@ func gmailLabels(v string) (folder string, seen, flagged, skip bool) {
 		folder = "sent"
 	default:
 		folder = "archive"
+		// An archived message with a label of the user's own goes to a folder of that name.
+		for _, l := range splitLabels(v) {
+			if l = strings.TrimSpace(l); l != "" && !gmailSystemLabel(strings.ToLower(l)) {
+				folder = "keep:" + importFolderPath(l, "/")
+				break
+			}
+		}
 	}
 	return
+}
+
+// gmailSystemLabel reports Gmail's own labels (lower-case), which aren't folders here.
+func gmailSystemLabel(l string) bool {
+	switch l {
+	case "inbox", "sent", "important", "starred", "unread", "opened", "archived", "spam", "trash", "chat", "chats", "draft", "drafts":
+		return true
+	}
+	return strings.HasPrefix(l, "category ") || strings.HasPrefix(l, "[gmail]") || strings.HasPrefix(l, "[imap]")
 }
 
 // splitLabels splits a comma-separated label list, honouring double quotes.

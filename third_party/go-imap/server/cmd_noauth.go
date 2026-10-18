@@ -102,6 +102,7 @@ func (cmd *Login) Handle(conn Conn) error {
 
 	ctx.State = imap.AuthenticatedState
 	ctx.User = user
+	conn.authenticated()
 	return afterAuthStatus(conn)
 }
 

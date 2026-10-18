@@ -88,6 +88,7 @@ type Server struct {
 	locker    sync.Mutex
 	listeners map[net.Listener]struct{}
 	conns     map[Conn]struct{}
+	serving   sync.WaitGroup // Skien Mails patch: connection goroutines (see WaitConns)
 
 	commands   map[string]HandlerFactory
 	auths      map[string]SASLServerFactory
@@ -117,6 +118,18 @@ type Server struct {
 	// The maximum literal size, in bytes. Literals exceeding this size will be
 	// rejected. A value of zero disables the limit (this is the default).
 	MaxLiteralSize uint32
+
+	// Skien Mails patch (see PATCHES.md): limits that apply before a client has signed in.
+	// MaxLiteralSize applies until then; MaxLiteralSizeAuthed afterwards (0 = keep MaxLiteralSize).
+	// PreAuthTimeout replaces AutoLogout until sign-in (0 = AutoLogout).
+	MaxLiteralSizeAuthed uint32
+	PreAuthTimeout       time.Duration
+	// Skien Mails patch: LiteralBudget caps the literal bytes held in memory at once (nil = no
+	// limit). Several servers may share one budget; literals are released when their command
+	// finishes.
+	LiteralBudget *LiteralBudget
+	// IdlePoll is how often a mailbox is polled during IDLE when it has no notifier (0 = 30s).
+	IdlePoll time.Duration
 }
 
 // Create a new IMAP server from an existing listener.
@@ -143,6 +156,7 @@ func New(bkd backend.Backend) *Server {
 				ctx := conn.Context()
 				ctx.State = imap.AuthenticatedState
 				ctx.User = user
+				conn.authenticated()
 				return nil
 			})
 		},
@@ -225,6 +239,7 @@ func (s *Server) Serve(l net.Listener) error {
 			}
 		}
 
+		s.serving.Add(1) // before the goroutine starts, so WaitConns can't miss it
 		go s.serveConn(conn)
 	}
 }
@@ -275,6 +290,7 @@ func (s *Server) serveConn(conn Conn) error {
 		defer s.locker.Unlock()
 		conn.Close()
 		delete(s.conns, conn)
+		s.serving.Done()
 	}()
 
 	return conn.serve(conn)
@@ -393,11 +409,30 @@ func (s *Server) Close() error {
 		l.Close()
 	}
 
+	// Skien Mails patch: close only the network connections. Each connection's own goroutine
+	// then finishes its current command and logs out (calling Close here raced with sign-in).
 	for conn := range s.conns {
-		conn.Close()
+		if nc, ok := conn.(interface{ closeNet() error }); ok {
+			nc.closeNet()
+		} else {
+			conn.Close()
+		}
 	}
 
 	return nil
+}
+
+// WaitConns waits (up to d) until every connection's goroutine has finished, after Close.
+// Skien Mails patch: shutdown lets commands that are running finish before storage closes.
+func (s *Server) WaitConns(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() { s.serving.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // Enable some IMAP extensions on this server.
@@ -416,4 +451,50 @@ func (s *Server) Enable(extensions ...Extension) {
 // Wiki entry: https://github.com/emersion/go-imap/wiki/Using-authentication-mechanisms
 func (s *Server) EnableAuth(name string, f SASLServerFactory) {
 	s.auths[name] = f
+}
+
+// LiteralBudget limits message uploads (literals) held in memory: in total, and per signed-in
+// account so one account can't take it all. Skien Mails patch.
+type LiteralBudget struct {
+	Max     int64         // all connections together
+	PerUser int64         // one account (0 = no separate limit)
+	Grace   time.Duration // time to deliver a literal on top of the minimum rate (0 = 1 minute)
+
+	mu     sync.Mutex
+	used   int64
+	byUser map[string]int64
+}
+
+func (b *LiteralBudget) reserve(user string, n int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used+n > b.Max || (user != "" && b.PerUser > 0 && b.byUser[user]+n > b.PerUser) {
+		return false
+	}
+	b.used += n
+	if user != "" {
+		if b.byUser == nil {
+			b.byUser = map[string]int64{}
+		}
+		b.byUser[user] += n
+	}
+	return true
+}
+
+func (b *LiteralBudget) release(user string, n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.used -= n
+	if user != "" {
+		if b.byUser[user] -= n; b.byUser[user] <= 0 {
+			delete(b.byUser, user)
+		}
+	}
+}
+
+// InUse reports the bytes reserved right now (for tests and monitoring).
+func (b *LiteralBudget) InUse() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
 }

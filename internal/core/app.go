@@ -17,7 +17,7 @@ const ProductName = "Skien Mails"
 
 // Version is the release number (see CHANGELOG.md). Bump it with every release:
 // 1.0.0 → 1.0.1 for fixes and small additions, 1.1.0 for bigger features.
-var Version = "1.0.1"
+var Version = "1.1.0"
 
 // App ties together storage, SMTP, delivery and the web server.
 type App struct {
@@ -35,6 +35,8 @@ type App struct {
 	limiter   *RateLimiter
 	imp       *importer
 	qd        *queueDispatcher
+	push      *pusher
+	imapMaint sync.Map // "user|folder" -> change counter at the folder's last IMAP UID-map update
 
 	setupToken string
 
@@ -77,6 +79,7 @@ func NewApp(cfg *Config, log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 	a.TLS = NewTLSManager(a)
+	a.push = newPusher(a)
 	if !a.SetupDone() {
 		a.setupToken = cfg.SetupToken
 		if a.setupToken == "" {
@@ -145,16 +148,19 @@ func (a *App) Start() error {
 	if err := a.startSMTP(); err != nil {
 		return err
 	}
+	a.startIMAP() // logs and carries on if its ports can't be opened
 	return a.startHTTP()
 }
 
 // Shutdown stops listeners and waits for workers.
 func (a *App) Shutdown() {
 	a.cancel()
+	a.push.stop()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	a.stopHTTP(ctx)
 	a.stopSMTP(ctx)
+	a.stopIMAP()
 	done := make(chan struct{})
 	go func() { a.wg.Wait(); close(done) }()
 	select {
