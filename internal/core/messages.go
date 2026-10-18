@@ -27,6 +27,9 @@ type DeliverOpts struct {
 	Meta         *Meta
 	Notify       bool
 	EnforceQuota bool
+	Flagged      bool  // starred on arrival (imports)
+	ReceivedAt   int64 // ms; 0 = now (imports keep the original date)
+	Quiet        bool  // don't publish a sync event (imports publish in batches)
 }
 
 func (a *App) blobPath(rel string) string { return filepath.Join(a.Cfg.DataDir, "mail", rel) }
@@ -119,7 +122,9 @@ func (a *App) Deliver(userID int64, raw []byte, o DeliverOpts) (int64, error) {
 		os.Remove(a.blobPath(rel))
 		return 0, err
 	}
-	if o.Notify {
+	if o.Quiet {
+		// caller publishes
+	} else if o.Notify {
 		a.Events.Publish(userID, Event{Type: "mail", Folder: o.Folder, From: firstNonEmpty(m.From.Name, m.From.Email), Subject: m.Subject})
 	} else {
 		a.Events.Publish(userID, Event{Type: "sync", Folder: o.Folder})
@@ -268,12 +273,16 @@ func (a *App) insertMessage(userID int64, rel string, size int64, m *Meta, o Del
 
 	snippet := Snippet(stripQuoted(m.Text), 180)
 	now := nowMs()
+	received := now
+	if o.ReceivedAt > 0 && o.ReceivedAt <= now+24*3600*1000 {
+		received = o.ReceivedAt
+	}
 	res, err := tx.Exec(`INSERT INTO messages(user_id, folder, thread_id, message_id, in_reply_to, refs, from_addr, from_name, to_json, cc_json, bcc_json,
-		reply_to, subject, snippet, date, received_at, size, has_attach, seen, spam_score, auth_summary, blob, trashed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		reply_to, subject, snippet, date, received_at, size, has_attach, seen, flagged, spam_score, auth_summary, blob, trashed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		userID, o.Folder, thread, m.MessageID, m.InReplyTo, strings.Join(m.Refs, " "), m.From.Email, m.From.Name,
-		addrsJSON(m.To), addrsJSON(m.Cc), addrsJSON(o.Bcc), m.ReplyTo, m.Subject, snippet, m.Date.UnixMilli(), now, size,
-		m.HasAttach, o.Seen, o.SpamScore, o.AuthSummary, rel, trashedAt(o.Folder, now))
+		addrsJSON(m.To), addrsJSON(m.Cc), addrsJSON(o.Bcc), m.ReplyTo, m.Subject, snippet, m.Date.UnixMilli(), received, size,
+		m.HasAttach, o.Seen, o.Flagged, o.SpamScore, o.AuthSummary, rel, trashedAt(o.Folder, now))
 	if err != nil {
 		return 0, err
 	}

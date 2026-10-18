@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	blitiri.com.ar/go/spf v1.6.0
+	github.com/emersion/go-imap v1.2.1
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
@@ -28,3 +29,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+replace github.com/emersion/go-imap => ./third_party/go-imap

@@ -23,18 +23,60 @@ const queueMaxAge = 4 * 24 * time.Hour
 var backoff = []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour,
 	2 * time.Hour, 4 * time.Hour, 6 * time.Hour, 8 * time.Hour}
 
+// The outbound queue lives in the database (queue + queue_rcpts), so nothing is lost on a
+// restart or crash: every recipient stays "pending"/"deferred" until a remote server accepted
+// it, it failed permanently, or it expired after 4 days (then the sender gets a bounce).
+//
+// A dispatcher hands due recipients to a pool of workers (SM_QUEUE_WORKERS, default 16).
+// Recipients of one message at the same destination share one SMTP session, at most
+// SM_QUEUE_PER_DOMAIN sessions (default 4) run against one destination at a time, and a slow
+// server never holds up mail to other destinations. Every attempt is logged for the admin.
+
+type queueDispatcher struct {
+	mu        sync.Mutex
+	inflight  map[int64]bool // recipient rows being delivered
+	perDest   map[string]int // sessions running per destination
+	workers   int
+	perDomain int
+	slots     chan struct{}
+	// send replaces real SMTP delivery in tests.
+	send func(ctx context.Context, domain, from string, rcpts []string, raw []byte) (map[string]error, string)
+}
+
+func newQueueDispatcher() *queueDispatcher {
+	w := envIntRange("SM_QUEUE_WORKERS", 16, 1, 256)
+	return &queueDispatcher{
+		inflight: map[int64]bool{}, perDest: map[string]int{},
+		workers: w, perDomain: envIntRange("SM_QUEUE_PER_DOMAIN", 4, 1, 64),
+		slots: make(chan struct{}, w),
+	}
+}
+
+func envIntRange(key string, def, lo, hi int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil && v >= lo && v <= hi {
+		return v
+	}
+	return def
+}
+
+// QueueActive reports recipients being delivered right now.
+func (a *App) QueueActive() int {
+	a.qd.mu.Lock()
+	defer a.qd.mu.Unlock()
+	return len(a.qd.inflight)
+}
+
 func (a *App) queueWorker(ctx context.Context) {
-	t := time.NewTicker(20 * time.Second)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
-	a.processQueue(ctx)
 	for {
+		a.dispatchQueue(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-a.queueKick:
 		}
-		a.processQueue(ctx)
 	}
 }
 
@@ -46,9 +88,13 @@ type dueRcpt struct {
 	attempts int
 }
 
-func (a *App) processQueue(ctx context.Context) {
+// dispatchQueue starts deliveries for due recipients until workers or destinations are busy.
+func (a *App) dispatchQueue(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	rows, err := a.DB.Query(`SELECT id, queue_id, rcpt, domain, attempts FROM queue_rcpts
-		WHERE status IN ('pending','deferred') AND next_attempt <= ? ORDER BY next_attempt LIMIT 500`, nowMs())
+		WHERE status IN ('pending','deferred') AND next_attempt <= ? ORDER BY next_attempt, id LIMIT 2000`, nowMs())
 	if err != nil {
 		a.Log.Error("queue scan", "err", err)
 		return
@@ -56,9 +102,11 @@ func (a *App) processQueue(ctx context.Context) {
 	groups := map[string][]dueRcpt{}
 	var order []string
 	relay := a.Settings.Get(SetRelayHost) != ""
+	qd := a.qd
+	qd.mu.Lock()
 	for rows.Next() {
 		var d dueRcpt
-		if err := rows.Scan(&d.id, &d.queueID, &d.rcpt, &d.domain, &d.attempts); err != nil {
+		if err := rows.Scan(&d.id, &d.queueID, &d.rcpt, &d.domain, &d.attempts); err != nil || qd.inflight[d.id] {
 			continue
 		}
 		key := fmt.Sprintf("%d|%s", d.queueID, strings.ToLower(d.domain))
@@ -70,38 +118,83 @@ func (a *App) processQueue(ctx context.Context) {
 		}
 		groups[key] = append(groups[key], d)
 	}
+	qd.mu.Unlock()
 	rows.Close()
-	if len(order) == 0 {
-		return
-	}
-	sem := make(chan struct{}, 4)
-	var wg sync.WaitGroup
 	for _, k := range order {
-		if ctx.Err() != nil {
-			break
-		}
 		list := groups[k]
-		sem <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-sem; wg.Done() }()
+		dest := strings.ToLower(list[0].domain)
+		if relay {
+			dest = "*relay*"
+		}
+		qd.mu.Lock()
+		if qd.perDest[dest] >= qd.perDomain {
+			qd.mu.Unlock()
+			continue // this destination is busy; other destinations still go
+		}
+		select {
+		case qd.slots <- struct{}{}:
+		default:
+			qd.mu.Unlock()
+			return // all workers busy; a finishing delivery kicks the next round
+		}
+		qd.perDest[dest]++
+		for _, d := range list {
+			qd.inflight[d.id] = true
+		}
+		qd.mu.Unlock()
+		a.Go(func(ctx context.Context) {
+			defer func() {
+				qd.mu.Lock()
+				qd.perDest[dest]--
+				if qd.perDest[dest] <= 0 {
+					delete(qd.perDest, dest)
+				}
+				for _, d := range list {
+					delete(qd.inflight, d.id)
+				}
+				qd.mu.Unlock()
+				<-qd.slots
+				a.KickQueue()
+			}()
 			a.deliverGroup(ctx, list)
-		}()
+		})
 	}
-	wg.Wait()
 }
 
 func (a *App) deliverGroup(ctx context.Context, list []dueRcpt) {
+	// The dispatcher's scan can be a moment stale: a recipient another worker just finished
+	// (or an admin just stopped) may still look due in it. Re-read each one now that it's
+	// claimed, so nothing is ever sent twice.
+	fresh := list[:0:0]
+	now := nowMs()
+	for _, d := range list {
+		var status string
+		var next int64
+		if err := a.DB.QueryRow(`SELECT status, next_attempt, attempts FROM queue_rcpts WHERE id=?`, d.id).Scan(&status, &next, &d.attempts); err != nil {
+			continue
+		}
+		if (status == "pending" || status == "deferred") && next <= now {
+			fresh = append(fresh, d)
+		}
+	}
+	if len(fresh) == 0 {
+		return
+	}
+	list = fresh
 	qid := list[0].queueID
 	var sender, subject, blob string
 	var userID, created int64
 	if err := a.DB.QueryRow(`SELECT sender, subject, blob, user_id, created_at FROM queue WHERE id=?`, qid).Scan(&sender, &subject, &blob, &userID, &created); err != nil {
 		return
 	}
+	if ctx.Err() != nil {
+		return // shutting down: stays queued
+	}
 	raw, err := os.ReadFile(filepath.Join(a.Cfg.DataDir, "queue", blob))
-	if err != nil {
+	if blob == "" || err != nil {
 		for _, d := range list {
 			a.finishRcpt(d, "failed", "queued message file missing")
+			a.logAttempt(d, "", "failed", "queued message file missing", 0)
 		}
 		return
 	}
@@ -109,19 +202,36 @@ func (a *App) deliverGroup(ctx context.Context, list []dueRcpt) {
 	for i, d := range list {
 		rcpts[i] = d.rcpt
 	}
+	start := time.Now()
 	var results map[string]error
-	if host := a.Settings.Get(SetRelayHost); host != "" {
-		results = a.sendViaRelay(ctx, host, sender, rcpts, raw)
-	} else {
-		results = a.sendDirect(ctx, list[0].domain, sender, rcpts, raw)
+	var host string
+	switch {
+	case a.qd.send != nil:
+		results, host = a.qd.send(ctx, list[0].domain, sender, rcpts, raw)
+	case a.Settings.Get(SetRelayHost) != "":
+		results, host = a.sendViaRelay(ctx, a.Settings.Get(SetRelayHost), sender, rcpts, raw)
+	default:
+		results, host = a.sendDirect(ctx, list[0].domain, sender, rcpts, raw)
 	}
+	took := time.Since(start)
+	// Shutting down mid-delivery: what the server accepted or refused for good is recorded as
+	// usual (so it's never sent again); only recipients without a final answer stay queued as
+	// they were, with no attempt counted.
+	stopping := ctx.Err() != nil
 	failures := map[string]string{}
 	expired := time.Since(time.UnixMilli(created)) > queueMaxAge
 	for _, d := range list {
-		err := results[d.rcpt]
+		err, known := results[d.rcpt]
+		if !known {
+			err = tempErr("no result from %s", firstNonEmpty(host, d.domain))
+		}
+		if stopping && err != nil && !isPermanent(err) {
+			continue
+		}
 		switch {
 		case err == nil:
 			a.finishRcpt(d, "sent", "")
+			a.logAttempt(d, host, "sent", "", took)
 			a.logMail("out", sender, d.rcpt, subject, "sent", "", "")
 		case isPermanent(err) || expired:
 			msg := err.Error()
@@ -129,6 +239,7 @@ func (a *App) deliverGroup(ctx context.Context, list []dueRcpt) {
 				msg = "Gave up after 4 days of retrying: " + msg
 			}
 			a.finishRcpt(d, "failed", msg)
+			a.logAttempt(d, host, "failed", msg, took)
 			a.logMail("out", sender, d.rcpt, subject, "failed", msg, "")
 			failures[d.rcpt] = msg
 		default:
@@ -139,6 +250,7 @@ func (a *App) deliverGroup(ctx context.Context, list []dueRcpt) {
 			next := time.Now().Add(backoff[n])
 			a.DB.Exec(`UPDATE queue_rcpts SET status='deferred', attempts=attempts+1, next_attempt=?, last_error=?, updated_at=? WHERE id=?`,
 				next.UnixMilli(), truncate(err.Error(), 500), nowMs(), d.id)
+			a.logAttempt(d, host, "deferred", err.Error(), took)
 			a.logMail("out", sender, d.rcpt, subject, "deferred", err.Error(), "")
 		}
 	}
@@ -148,6 +260,12 @@ func (a *App) deliverGroup(ctx context.Context, list []dueRcpt) {
 	if userID > 0 {
 		a.Events.Publish(userID, Event{Type: "queue"})
 	}
+}
+
+// logAttempt records one delivery attempt for the admin's queue log.
+func (a *App) logAttempt(d dueRcpt, host, result, detail string, took time.Duration) {
+	a.DB.Exec(`INSERT INTO queue_attempts(queue_id, rcpt_id, rcpt, at, host, result, detail, ms) VALUES(?,?,?,?,?,?,?,?)`,
+		d.queueID, d.id, d.rcpt, nowMs(), host, result, truncate(detail, 500), took.Milliseconds())
 }
 
 func truncate(s string, n int) string { return truncateRunes(strings.ToValidUTF8(s, ""), n) }
@@ -190,7 +308,7 @@ func allErr(rcpts []string, err error) map[string]error {
 }
 
 // sendDirect delivers to the recipient domain's MX hosts.
-func (a *App) sendDirect(ctx context.Context, domain, from string, rcpts []string, raw []byte) map[string]error {
+func (a *App) sendDirect(ctx context.Context, domain, from string, rcpts []string, raw []byte) (map[string]error, string) {
 	if ascii, err := idna.Lookup.ToASCII(domain); err == nil {
 		domain = ascii // the resolver only takes ASCII names
 	}
@@ -206,18 +324,18 @@ func (a *App) sendDirect(ctx context.Context, domain, from string, rcpts []strin
 			addrs, aerr := net.DefaultResolver.LookupHost(actx, domain)
 			cancel()
 			if aerr != nil || len(addrs) == 0 {
-				return allErr(rcpts, &deliveryError{perm: true, msg: "Domain " + domain + " does not exist or has no mail server"})
+				return allErr(rcpts, &deliveryError{perm: true, msg: "Domain " + domain + " does not exist or has no mail server"}), ""
 			}
 			hosts = []string{domain}
 		} else {
-			return allErr(rcpts, tempErr("DNS lookup for %s failed: %v", domain, err))
+			return allErr(rcpts, tempErr("DNS lookup for %s failed: %v", domain, err)), ""
 		}
 	} else {
 		sort.SliceStable(mxs, func(i, j int) bool { return mxs[i].Pref < mxs[j].Pref })
 		for _, mx := range mxs {
 			h := strings.TrimSuffix(mx.Host, ".")
 			if h == "" {
-				return allErr(rcpts, &deliveryError{perm: true, msg: domain + " does not accept email (null MX)"})
+				return allErr(rcpts, &deliveryError{perm: true, msg: domain + " does not accept email (null MX)"}), ""
 			}
 			hosts = append(hosts, h)
 		}
@@ -226,21 +344,22 @@ func (a *App) sendDirect(ctx context.Context, domain, from string, rcpts []strin
 		hosts = hosts[:5]
 	}
 	var lastErr error = tempErr("no mail servers for %s", domain)
+	lastHost := ""
 	for _, h := range hosts {
 		res, connErr := a.smtpTransaction(ctx, h, "25", false, false, nil, from, rcpts, raw)
 		if connErr == nil {
-			return res
+			return res, h
 		}
-		lastErr = connErr
-		if isPermanent(connErr) {
-			return allErr(rcpts, connErr)
+		lastErr, lastHost = connErr, h
+		if isPermanent(connErr) || ctx.Err() != nil {
+			return allErr(rcpts, connErr), h
 		}
 	}
-	return allErr(rcpts, lastErr)
+	return allErr(rcpts, lastErr), lastHost
 }
 
 // sendViaRelay delivers everything through the configured smarthost.
-func (a *App) sendViaRelay(ctx context.Context, host, from string, rcpts []string, raw []byte) map[string]error {
+func (a *App) sendViaRelay(ctx context.Context, host, from string, rcpts []string, raw []byte) (map[string]error, string) {
 	port := a.Settings.Get(SetRelayPort)
 	if port == "" {
 		port = "587"
@@ -252,9 +371,9 @@ func (a *App) sendViaRelay(ctx context.Context, host, from string, rcpts []strin
 	}
 	res, err := a.smtpTransaction(ctx, host, port, implicit, true, auth, from, rcpts, raw)
 	if err != nil {
-		return allErr(rcpts, err)
+		return allErr(rcpts, err), host
 	}
-	return res
+	return res, host
 }
 
 // smtpTransaction runs one SMTP session. A non-nil error means the host could

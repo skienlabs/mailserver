@@ -154,6 +154,7 @@ func (a *App) mePayload(u *User) map[string]any {
 		"org":      map[string]any{"name": a.OrgName(), "hostname": a.Hostname(), "domains": domains},
 		"max_size": a.MaxMessageBytes(),
 		"product":  ProductName,
+		"version":  Version,
 	}
 }
 

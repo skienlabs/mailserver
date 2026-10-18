@@ -127,6 +127,15 @@ Each employee must choose their own password the first time they sign in. After 
 
 **Groups** (`info@`, `team@`, `support@`) deliver to several people. Members you allow can also send as the group from the **From** menu in compose.
 
+### Bringing over old mail (Zoho, Gmail, others)
+
+Each person can import their old mail in **Settings → Import mail**. Their old account isn't changed.
+
+- **From the old account (recommended for Zoho).** Pick the provider (Zoho company domain or @zohomail, data centre India / US / Europe, Gmail, Yahoo or any IMAP server), sign in, choose where each folder goes, and start. Folders, read status, stars and original dates are kept. In Zoho, first turn on *Settings → Mail Accounts → IMAP Access*. If the account uses two-step verification, use an app-specific password. The password is used only for that import and isn't stored.
+- **From a file.** Upload a Zoho export (*Zoho Mail → Settings → Import/Export → Export*, a `.zip` of `.eml` files), a Google Takeout or Thunderbird `.mbox`, or a single `.eml`. Large files are uploaded in parts and resume after a dropped connection; up to 20 GB per file.
+
+Imports run in the background. Running one again is safe because messages already in the mailbox are skipped. Imported mail counts toward the mailbox size limit; an import stops cleanly when the mailbox is full.
+
 ### Installing the app on Windows
 
 Open `https://mail.skienlab.com` in Edge or Chrome and click **Install** (the icon at the right end of the address bar). You can also open the account menu and choose **Install Skien Mails app**. It gets its own window and taskbar icon, shows an unread badge, and handles `mailto:` links.
@@ -163,6 +172,9 @@ Renewed certificates are picked up automatically within a minute. If Nginx Proxy
 | `SM_TRUST_PROXY` | `true` | Trust `X-Forwarded-*` headers from private-network proxies |
 | `SM_SETUP_TOKEN` | random | Fixed setup code, if you prefer |
 | `SM_MAX_MESSAGE_MB` | `25` | Default message size limit |
+| `SM_DB_CACHE_MB` | `64` | Database page cache per connection (up to 8 connections). Raise it on large servers (e.g. `256` with 32 GB RAM); lower it on very small ones. |
+| `SM_QUEUE_WORKERS` | `16` | Outgoing deliveries that run at the same time (1–256). |
+| `SM_QUEUE_PER_DOMAIN` | `4` | Of those, how many may go to one destination at once (1–64), so big providers don't throttle the server. |
 | `SM_DEBUG` | `false` | Verbose logging |
 
 ## Operations

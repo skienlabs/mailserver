@@ -1,5 +1,6 @@
 // Personal settings: profile, appearance, notifications, security, out-of-office, email apps.
-import { $, html, raw, icon, setHTML, api, upload, snack, avatar, ago, field, passwordToggle, toastError, squareImage, confirmDialog, dateOnly, copyText } from './lib.js';
+import { $, html, raw, icon, setHTML, api, upload, snack, avatar, ago, field, passwordToggle, toastError, squareImage, confirmDialog, dateOnly, copyText,
+  selectField, bytes, plural, bus } from './lib.js';
 import { S, setTheme, themePref, navigate, pref, loadDirectory } from './state.js';
 import { cleanForEditor } from './compose.js';
 
@@ -8,6 +9,7 @@ const TABS = [
   ['security', 'lock', 'Security'],
   ['vacation', 'beach_access', 'Out of office'],
   ['apps', 'devices', 'Email apps'],
+  ['import', 'download', 'Import mail'],
 ];
 
 export function render(viewEl, r) {
@@ -17,7 +19,7 @@ export function render(viewEl, r) {
     <nav class="tabs">${TABS.map(([id, ic, label]) => html`<a class="tab ${tab === id ? 'on' : ''}" href="#/settings/${id}">${icon(ic, 's')}${label}</a>`)}</nav>
     <div class="page"><div class="page-inner" id="pane"></div></div>`);
   const pane = $('#pane');
-  ({ general, security, vacation, apps })[tab](pane);
+  ({ general, security, vacation, apps, import: importMail })[tab](pane);
 }
 
 // ---------------------------------------------------------------- general
@@ -262,4 +264,323 @@ function apps(pane) {
       </div>
     </div>`);
   pane.querySelectorAll('[data-copy]').forEach((b) => (b.onclick = () => copyText(b.dataset.copy)));
+}
+
+// ---------------------------------------------------------------- import mail
+// Bring mail over from Zoho, Gmail or any IMAP account, or from exported files.
+const PROVIDERS = [
+  { id: 'zoho-org', label: 'Zoho Mail — company domain', hosts: { in: 'imappro.zoho.in', com: 'imappro.zoho.com', eu: 'imappro.zoho.eu' } },
+  { id: 'zoho', label: 'Zoho Mail — @zohomail.com address', hosts: { in: 'imap.zoho.in', com: 'imap.zoho.com', eu: 'imap.zoho.eu' } },
+  { id: 'gmail', label: 'Gmail or Google Workspace', host: 'imap.gmail.com' },
+  { id: 'yahoo', label: 'Yahoo Mail', host: 'imap.mail.yahoo.com' },
+  { id: 'other', label: 'Another provider (IMAP)', host: '' },
+];
+const REGIONS = [{ value: 'in', label: 'India (zoho.in)' }, { value: 'com', label: 'United States (zoho.com)' }, { value: 'eu', label: 'Europe (zoho.eu)' }];
+const TARGETS = [
+  { value: 'inbox', label: 'Inbox' }, { value: 'archive', label: 'Archive' }, { value: 'sent', label: 'Sent' },
+  { value: 'spam', label: 'Spam' }, { value: 'trash', label: 'Trash' }, { value: 'skip', label: 'Don\u2019t import' },
+];
+const PROVIDER_HELP = {
+  'zoho-org': html`In Zoho Mail, open <b>Settings → Mail Accounts → IMAP</b> and turn on <b>IMAP Access</b>. If you sign in with two-step verification, create an <b>app-specific password</b> (Zoho Accounts → Security → App Passwords) and use it below. The exact server name is shown in Zoho under the same IMAP settings.`,
+  zoho: html`In Zoho Mail, open <b>Settings → Mail Accounts → IMAP</b> and turn on <b>IMAP Access</b>. With two-step verification on, use an <b>app-specific password</b> from Zoho Accounts → Security.`,
+  gmail: html`Google needs an <b>app password</b>: turn on 2-Step Verification in your Google Account, then create one under <b>Security → App passwords</b>. Some company Google accounts don't allow app passwords — ask your Google admin, or use a Google Takeout <b>.mbox</b> file below instead.`,
+  yahoo: html`Create an <b>app password</b> in Yahoo Account Info → Account security, and use it below.`,
+  other: html`Use the IMAP server name from your provider's help pages (it must support SSL/TLS on port 993).`,
+};
+
+let importPoll = null;
+
+function importMail(pane) {
+  clearTimeout(importPoll);
+  const me = S.me.user;
+  setHTML(pane, html`
+    <div class="section">
+      <h2>Import from another account</h2>
+      <p class="lead">Copy your old mail into Skien Mails directly from Zoho, Gmail or any provider with IMAP. Your old account isn't changed, and folders, read status, stars and original dates are kept.</p>
+      <div class="panel imp-panel">
+        <form id="imp-form" autocomplete="off">
+          <div class="row2">
+            ${selectField({ label: 'Provider', name: 'provider', value: 'zoho-org', options: PROVIDERS.map((p) => ({ value: p.id, label: p.label })) })}
+            <div id="imp-region">${selectField({ label: 'Zoho data centre', name: 'region', value: 'in', options: REGIONS })}</div>
+          </div>
+          <p class="imp-help" id="imp-help"></p>
+          ${field({ label: 'IMAP server', name: 'host', value: 'imappro.zoho.in', hint: 'Connects securely (SSL/TLS) on port 993.', attrs: 'autocapitalize="off" spellcheck="false" required' })}
+          <div class="row2">
+            ${field({ label: 'Email address (old account)', name: 'username', value: me.email, attrs: 'autocapitalize="off" spellcheck="false" required autocomplete="off"' })}
+            ${field({ label: 'Password or app password', name: 'password', type: 'password', attrs: 'required autocomplete="new-password"' })}
+          </div>
+          <p class="form-err" id="imp-err" role="alert"></p>
+          <div class="form-actions"><button class="btn filled" type="submit" id="imp-connect">${icon('sync_alt')}Connect and choose folders</button></div>
+        </form>
+        <div id="imp-folders" hidden></div>
+      </div>
+    </div>
+    <div class="section">
+      <h2>Import from a file</h2>
+      <p class="lead">Upload an export from your old provider: a <b>.zip</b> of emails (Zoho Mail → Settings → Import/Export → Export), an <b>.mbox</b> file (Google Takeout, Thunderbird) or a single <b>.eml</b> message.</p>
+      <div class="panel imp-panel">
+        <form id="file-form">
+          <label class="imp-drop" id="imp-drop">
+            <input type="file" id="imp-file" accept=".zip,.mbox,.eml,application/zip,message/rfc822" hidden>
+            ${icon('folder_zip', 'l')}<span id="imp-file-label"><b>Choose a file</b> or drop it here</span>
+          </label>
+          <div class="row2">
+            ${selectField({ label: 'Put messages in', name: 'folder', value: 'auto', options: [
+              { value: 'auto', label: 'Sort automatically' }, { value: 'inbox', label: 'Inbox' }, { value: 'archive', label: 'Archive' }, { value: 'sent', label: 'Sent' }] })}
+            ${field({ label: 'Your address in the old account', name: 'old_email', value: me.email, hint: 'Messages from this address go to Sent.', attrs: 'autocapitalize="off" spellcheck="false"' })}
+          </div>
+          <label class="check"><input type="checkbox" class="cb" name="mark_read" checked><span>Mark imported messages as read</span></label>
+          <div class="imp-upload" id="imp-upload" hidden><div class="progress"><i id="imp-bar" style="width:0%"></i></div><span id="imp-upload-label"></span></div>
+          <p class="form-err" id="file-err" role="alert"></p>
+          <div class="form-actions">
+            <button class="btn" type="button" id="file-cancel" hidden>Cancel upload</button>
+            <button class="btn filled" type="submit" id="file-start" disabled>${icon('upload')}Upload and import</button>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div class="section">
+      <h2>Your imports</h2>
+      <p class="lead">Imports keep running if you close this page. Running one again is safe — messages already in your mailbox are skipped.</p>
+      <div id="imp-jobs"></div>
+    </div>`);
+
+  // ---- account form
+  const form = $('#imp-form');
+  const impErr = $('#imp-err');
+  const syncProvider = (changed) => {
+    const p = PROVIDERS.find((x) => x.id === form.provider.value);
+    const zoho = !!p.hosts;
+    $('#imp-region').hidden = !zoho;
+    setHTML($('#imp-help'), PROVIDER_HELP[p.id] || '');
+    if (changed) {
+      form.host.value = zoho ? p.hosts[form.region.value] : p.host;
+    }
+  };
+  form.provider.onchange = () => syncProvider(true);
+  form.region.onchange = () => syncProvider(true);
+  syncProvider(false);
+  const source = () => ({ host: form.host.value.trim(), security: 'tls', port: 993, username: form.username.value.trim(), password: form.password.value });
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $('#imp-connect');
+    impErr.textContent = '';
+    btn.classList.add('busy');
+    try {
+      const res = await api('/import/imap/folders', { method: 'POST', body: source() });
+      showFolders(res.folders);
+    } catch (er) {
+      impErr.textContent = er.message;
+    } finally { btn.classList.remove('busy'); }
+  };
+
+  function showFolders(folders) {
+    const box = $('#imp-folders');
+    if (!folders.length) { impErr.textContent = 'No folders were found in that account.'; return; }
+    form.querySelectorAll('input, select, button').forEach((x) => (x.disabled = true));
+    setHTML(box, html`
+      <div class="imp-ok">${icon('check_circle', 's')}<span>Connected to <b>${form.host.value}</b>. Choose where each folder goes — folders that aren't Inbox, Sent, Spam or Trash go to Archive.</span></div>
+      <div class="imp-folders">${folders.map((f, i) => html`
+        <div class="imp-folder">
+          <span class="nm" dir="auto">${icon(f.target === 'skip' ? 'remove' : 'folder_zip', 's')}<span>${f.name}</span></span>
+          <span class="ct">${f.messages.toLocaleString()}</span>
+          <select data-i="${i}" aria-label="Destination for ${f.name}">${TARGETS.map((t) => html`<option value="${t.value}" ${t.value === f.target ? raw('selected') : ''}>${t.label}</option>`)}</select>
+        </div>`)}</div>
+      <p class="muted small" id="imp-total"></p>
+      <p class="form-err" id="imp-err2" role="alert"></p>
+      <div class="form-actions">
+        <button class="btn" type="button" id="imp-back">Back</button>
+        <button class="btn filled" type="button" id="imp-start">${icon('download')}Start import</button>
+      </div>`);
+    box.hidden = false;
+    const err2 = $('#imp-err2');
+    const recount = () => {
+      let n = 0;
+      box.querySelectorAll('select[data-i]').forEach((sel) => { if (sel.value !== 'skip') n += folders[+sel.dataset.i].messages; });
+      $('#imp-total').textContent = `${plural(n, 'message')} will be imported.`;
+      $('#imp-start').disabled = ![...box.querySelectorAll('select[data-i]')].some((x) => x.value !== 'skip');
+    };
+    box.querySelectorAll('select[data-i]').forEach((sel) => (sel.onchange = recount));
+    recount();
+    $('#imp-back').onclick = () => {
+      box.hidden = true;
+      form.querySelectorAll('input, select, button').forEach((x) => (x.disabled = false));
+    };
+    $('#imp-start').onclick = async (e) => {
+      const btn = e.currentTarget;
+      btn.classList.add('busy');
+      err2.textContent = '';
+      try {
+        const chosen = [...box.querySelectorAll('select[data-i]')].map((sel) => ({ name: folders[+sel.dataset.i].name, target: sel.value }));
+        await api('/import/imap', { method: 'POST', body: { ...source(), folders: chosen } });
+        form.password.value = ''; // not kept anywhere once the import has started
+        box.hidden = true;
+        form.querySelectorAll('input, select, button').forEach((x) => (x.disabled = false));
+        snack('Import started — you can keep working while it runs');
+        loadJobs();
+      } catch (er) {
+        err2.textContent = er.message;
+      } finally { btn.classList.remove('busy'); }
+    };
+  }
+
+  // ---- file form (elements captured once: an upload keeps going if you leave this page)
+  const fform = $('#file-form');
+  const input = $('#imp-file');
+  const fileLabel = $('#imp-file-label');
+  const startBtn = $('#file-start');
+  const cancelBtn = $('#file-cancel');
+  const errEl = $('#file-err');
+  const upBox = $('#imp-upload');
+  const bar = $('#imp-bar');
+  const upLabel = $('#imp-upload-label');
+  let file = null;
+  let aborter = null;
+  const pick = (f) => {
+    file = f || null;
+    setHTML(fileLabel, file ? html`<b dir="auto">${file.name}</b> · ${bytes(file.size)}` : html`<b>Choose a file</b> or drop it here`);
+    startBtn.disabled = !file;
+    errEl.textContent = '';
+  };
+  input.onchange = () => pick(input.files[0]);
+  const drop = $('#imp-drop');
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) pick(e.dataTransfer.files[0]); };
+  const warnLeave = (e) => { e.preventDefault(); e.returnValue = ''; };
+  fform.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!file || aborter) return;
+    const ext = file.name.toLowerCase().split('.').pop();
+    if (!['zip', 'mbox', 'eml', 'mbx'].includes(ext) && !(await confirmDialog('Import this file?', `“${file.name}” doesn't look like an email export (.zip, .mbox or .eml). Try it anyway?`, 'Try anyway'))) return;
+    const opts = { folder: fform.folder.value, mark_read: fform.mark_read.checked, old_email: fform.old_email.value.trim() };
+    aborter = new AbortController();
+    errEl.textContent = '';
+    upBox.hidden = false;
+    cancelBtn.hidden = false;
+    startBtn.classList.add('busy');
+    addEventListener('beforeunload', warnLeave);
+    const label = upLabel;
+    const t0 = Date.now();
+    try {
+      const id = await uploadInChunks(file, aborter.signal, (sent) => {
+        bar.style.width = ((sent / file.size) * 100).toFixed(1) + '%';
+        const secs = (Date.now() - t0) / 1000;
+        const eta = sent > 0 && secs > 2 ? Math.round(((file.size - sent) / sent) * secs) : 0;
+        label.textContent = `Uploading ${bytes(sent)} of ${bytes(file.size)}${eta > 5 ? ` · about ${eta > 90 ? Math.round(eta / 60) + ' min' : eta + ' s'} left` : ''}`;
+      });
+      label.textContent = 'Starting the import…';
+      await api('/import/file', { method: 'POST', body: { upload_id: id, ...opts } });
+      snack('Import started — you can keep working while it runs');
+      input.value = '';
+      pick(null);
+      loadJobs();
+    } catch (er) {
+      if (er.name !== 'AbortError') {
+        errEl.textContent = er.message;
+        if (!errEl.isConnected) toastError(er); // you've moved on to another page
+      }
+    } finally {
+      removeEventListener('beforeunload', warnLeave);
+      aborter = null;
+      upBox.hidden = true;
+      cancelBtn.hidden = true;
+      startBtn.classList.remove('busy');
+      bar.style.width = '0%';
+    }
+  };
+  cancelBtn.onclick = () => aborter?.abort();
+
+  // ---- jobs
+  const jobsEl = $('#imp-jobs');
+  async function loadJobs() {
+    clearTimeout(importPoll);
+    if (!jobsEl.isConnected) return;
+    let jobs;
+    try { jobs = (await api('/import/jobs', { background: true })).jobs; } catch { jobs = null; }
+    if (!jobsEl.isConnected) return;
+    if (jobs) paintJobs(jobs);
+    if (!jobs || jobs.some((j) => j.status === 'running' || j.status === 'queued')) importPoll = setTimeout(loadJobs, 2000);
+  }
+  function paintJobs(jobs) {
+    if (!jobs.length) { setHTML(jobsEl, html`<div class="panel imp-empty"><span class="muted">Nothing imported yet.</span></div>`); return; }
+    const STATUS = { queued: ['Waiting', 'gray'], running: ['Importing', 'blue'], done: ['Finished', 'green'], failed: ['Stopped', 'red'], cancelled: ['Cancelled', 'gray'], interrupted: ['Interrupted', 'amber'] };
+    setHTML(jobsEl, html`<div class="panel imp-jobs">${jobs.map((j) => {
+      const [label, tone] = STATUS[j.status] || [j.status, 'gray'];
+      const doneN = j.imported + j.skipped + j.failed;
+      const pct = j.total ? Math.min(100, (doneN / j.total) * 100) : j.status === 'done' ? 100 : 0;
+      const live = j.status === 'running' || j.status === 'queued';
+      const counts = [
+        j.imported ? `${j.imported.toLocaleString()} imported` : '',
+        j.skipped ? `${j.skipped.toLocaleString()} already there` : '',
+        j.failed ? `${j.failed.toLocaleString()} couldn't be imported` : '',
+      ].filter(Boolean).join(' · ') || (live ? 'Getting ready…' : 'No messages');
+      return html`<div class="imp-job">
+        <div class="hd">
+          ${icon(j.kind === 'imap' ? 'sync_alt' : 'folder_zip', 's')}
+          <b class="src" dir="auto">${j.source}</b>
+          <span class="pill ${tone}">${label}</span>
+          <span class="spacer"></span>
+          <span class="muted small">${ago(j.created_at)}</span>
+          ${live ? html`<button class="btn sm" data-cancel="${j.id}">Cancel</button>` : ''}
+        </div>
+        ${live || j.total ? html`<div class="progress ${live ? 'live' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div>` : ''}
+        <div class="muted small">${counts}${j.total ? ` of ${j.total.toLocaleString()}` : ''}${live && j.current ? html` · <span dir="auto">${j.current}</span>` : ''}</div>
+        ${j.message ? html`<div class="small imp-msg ${j.status === 'failed' ? 'bad' : ''}">${j.message}</div>` : ''}
+      </div>`;
+    })}</div>`);
+    jobsEl.querySelectorAll('[data-cancel]').forEach((b) => (b.onclick = async () => {
+      if (!(await confirmDialog('Cancel this import?', 'Messages imported so far stay in your mailbox. You can run it again later to continue.', 'Cancel import', true))) return;
+      try { await api(`/import/jobs/${b.dataset.cancel}/cancel`, { method: 'POST' }); loadJobs(); } catch (er) { toastError(er); }
+    }));
+  }
+  loadJobs();
+}
+
+/** Uploads a file in chunks; survives brief connection drops by resuming at the server's offset. */
+async function uploadInChunks(file, signal, onProgress) {
+  const { id, chunk } = await api('/import/uploads', { method: 'POST', body: { name: file.name, size: file.size } });
+  let off = 0;
+  let tries = 0;
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    while (off < file.size) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      let res;
+      try {
+        res = await fetch(`/api/import/uploads/${id}?offset=${off}`, {
+          method: 'PUT', credentials: 'same-origin', signal, body: file.slice(off, Math.min(off + chunk, file.size)),
+          headers: { 'X-SM': '1', 'Content-Type': 'application/octet-stream' },
+        });
+      } catch (e) {
+        if (e.name === 'AbortError') throw e;
+        if (++tries > 6) throw new Error('The upload keeps getting interrupted. Check your connection and try again.');
+        await wait(1000 * tries);
+        continue;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 409 && typeof data.received === 'number') {
+        // "busy": the previous attempt of this chunk is still being finished on the server
+        if (data.error === 'busy') {
+          if (++tries > 60) throw new Error('The upload got stuck. Try again.');
+          await wait(2000);
+        }
+        off = data.received;
+        continue;
+      }
+      if (res.status === 401) { bus.emit('unauthorized'); throw new Error('You were signed out.'); }
+      if (res.status === 413) throw new Error('The web server in front of Skien Mails refused the upload size. Ask your administrator to raise its upload limit.');
+      if (!res.ok) {
+        if (res.status >= 500 && ++tries <= 6) { await wait(1000 * tries); continue; }
+        throw new Error(data.error || `Upload failed (${res.status})`);
+      }
+      off = data.received;
+      tries = 0;
+      onProgress(off);
+    }
+  } catch (e) {
+    api(`/import/uploads/${id}`, { method: 'DELETE', background: true }).catch(() => {});
+    throw e;
+  }
+  return id;
 }

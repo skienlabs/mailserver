@@ -4,7 +4,7 @@ import "net/http"
 
 func (a *App) routes(m *http.ServeMux, version string) {
 	m.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"version": version, "product": ProductName})
+		writeJSON(w, http.StatusOK, map[string]any{"version": Version, "build": version, "product": ProductName})
 	})
 	// setup & auth
 	m.HandleFunc("GET /api/setup", a.handleSetupStatus)
@@ -50,6 +50,16 @@ func (a *App) routes(m *http.ServeMux, version string) {
 	m.HandleFunc("GET /api/vacation", a.authed(a.handleGetVacation))
 	m.HandleFunc("PUT /api/vacation", a.authed(a.handleSetVacation))
 
+	// importing mail from other providers
+	m.HandleFunc("POST /api/import/imap/folders", a.authed(a.handleImportIMAPFolders))
+	m.HandleFunc("POST /api/import/imap", a.authed(a.handleImportIMAPStart))
+	m.HandleFunc("POST /api/import/uploads", a.authed(a.handleImportUploadBegin))
+	m.HandleFunc("PUT /api/import/uploads/{id}", a.authed(a.handleImportUploadChunk))
+	m.HandleFunc("DELETE /api/import/uploads/{id}", a.authed(a.handleImportUploadDelete))
+	m.HandleFunc("POST /api/import/file", a.authed(a.handleImportFileStart))
+	m.HandleFunc("GET /api/import/jobs", a.authed(a.handleImportJobs))
+	m.HandleFunc("POST /api/import/jobs/{id}/cancel", a.authed(a.handleImportCancel))
+
 	// administration
 	m.HandleFunc("GET /api/admin/overview", a.admin(a.handleAdminOverview))
 	m.HandleFunc("GET /api/admin/users", a.admin(a.handleAdminUsers))
@@ -69,6 +79,8 @@ func (a *App) routes(m *http.ServeMux, version string) {
 	m.HandleFunc("GET /api/admin/queue", a.admin(a.handleAdminQueue))
 	m.HandleFunc("POST /api/admin/queue/{id}/retry", a.admin(a.handleAdminQueueRetry))
 	m.HandleFunc("POST /api/admin/queue/{id}/cancel", a.admin(a.handleAdminQueueCancel))
+	m.HandleFunc("POST /api/admin/queue/retry-all", a.admin(a.handleAdminQueueRetryAll))
+	m.HandleFunc("GET /api/admin/queue/messages/{id}", a.admin(a.handleAdminQueueMessage))
 	m.HandleFunc("GET /api/admin/log", a.admin(a.handleAdminLog))
 	m.HandleFunc("GET /api/admin/settings", a.admin(a.handleAdminGetSettings))
 	m.HandleFunc("PUT /api/admin/settings", a.admin(a.handleAdminSetSettings))

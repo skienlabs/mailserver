@@ -31,6 +31,8 @@ func (a *App) cleanup() {
 		}
 	}
 	a.DB.Exec(`DELETE FROM sessions WHERE expires_at < ?`, now.UnixMilli())
+	a.cleanImportUploads()
+	a.DB.Exec(`DELETE FROM imports WHERE finished_at > 0 AND finished_at < ?`, now.Add(-90*24*time.Hour).UnixMilli())
 	a.DB.Exec(`DELETE FROM mail_log WHERE ts < ?`, now.Add(-30*24*time.Hour).UnixMilli())
 	a.DB.Exec(`DELETE FROM vacation_log WHERE sent_at < ?`, now.Add(-30*24*time.Hour).UnixMilli())
 

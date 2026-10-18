@@ -75,7 +75,7 @@ func (a *App) handleAdminOverview(w http.ResponseWriter, r *http.Request, u *Use
 	writeJSON(w, http.StatusOK, map[string]any{
 		"users": users, "active_users": active, "admins": admins, "storage": storage, "messages": messages,
 		"queue":   map[string]int{"pending": pending, "deferred": deferred, "failed": failed},
-		"last24h": stats, "traffic": days, "tls_mode": a.TLS.Mode(), "hostname": a.Hostname(),
+		"last24h": stats, "traffic": days, "tls_mode": a.TLS.Mode(), "hostname": a.Hostname(), "version": Version,
 		"uptime": int64(time.Since(startedAt).Seconds()), "memory": mem.Sys, "goroutines": runtime.NumGoroutine(),
 		"relay": a.Settings.Get(SetRelayHost) != "",
 	})
@@ -451,55 +451,6 @@ func (a *App) handleAdminDeleteDomain(w http.ResponseWriter, r *http.Request, u 
 }
 
 // ---------------------------------------------------------------- queue & log
-
-func (a *App) handleAdminQueue(w http.ResponseWriter, r *http.Request, u *User) {
-	rows, err := a.DB.Query(`SELECT r.id, r.rcpt, r.status, r.attempts, r.next_attempt, r.last_error, r.updated_at, q.sender, q.subject, q.created_at, q.size
-		FROM queue_rcpts r JOIN queue q ON q.id = r.queue_id ORDER BY (r.status IN ('pending','deferred')) DESC, q.created_at DESC LIMIT 300`)
-	if err != nil {
-		a.internalError(w, err)
-		return
-	}
-	defer rows.Close()
-	type item struct {
-		ID          int64  `json:"id"`
-		Rcpt        string `json:"rcpt"`
-		Status      string `json:"status"`
-		Attempts    int    `json:"attempts"`
-		NextAttempt int64  `json:"next_attempt"`
-		LastError   string `json:"last_error"`
-		UpdatedAt   int64  `json:"updated_at"`
-		Sender      string `json:"sender"`
-		Subject     string `json:"subject"`
-		CreatedAt   int64  `json:"created_at"`
-		Size        int64  `json:"size"`
-	}
-	out := []item{}
-	for rows.Next() {
-		var it item
-		rows.Scan(&it.ID, &it.Rcpt, &it.Status, &it.Attempts, &it.NextAttempt, &it.LastError, &it.UpdatedAt, &it.Sender, &it.Subject, &it.CreatedAt, &it.Size)
-		out = append(out, it)
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (a *App) handleAdminQueueRetry(w http.ResponseWriter, r *http.Request, u *User) {
-	res, err := a.DB.Exec(`UPDATE queue_rcpts SET next_attempt=?, status='pending' WHERE id=? AND status IN ('pending','deferred')`, nowMs(), pathInt(r, "id"))
-	if err != nil {
-		a.internalError(w, err)
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		httpError(w, http.StatusBadRequest, "Only waiting messages can be retried")
-		return
-	}
-	a.KickQueue()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (a *App) handleAdminQueueCancel(w http.ResponseWriter, r *http.Request, u *User) {
-	a.DB.Exec(`UPDATE queue_rcpts SET status='failed', last_error='Cancelled by administrator', updated_at=? WHERE id=? AND status IN ('pending','deferred')`, nowMs(), pathInt(r, "id"))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
 
 func (a *App) handleAdminLog(w http.ResponseWriter, r *http.Request, u *User) {
 	q := "%" + strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q"))) + "%"

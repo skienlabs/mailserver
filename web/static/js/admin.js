@@ -62,6 +62,7 @@ async function overview(pane) {
     <div class="section">
       <h2>Server</h2>
       <div class="panel">
+        <div class="kv"><span class="k">Version</span><span class="v">${S.me.product || 'Skien Mails'} ${o.version || ''}</span></div>
         <div class="kv"><span class="k">Mail hostname</span><span class="v">${o.hostname}</span></div>
         <div class="kv"><span class="k">TLS certificate</span><span class="v">${{ letsencrypt: "Let's Encrypt (automatic)", file: 'Certificate file (from your reverse proxy)', 'self-signed': 'Self-signed — fine for server-to-server mail; set SM_TLS_CERT for email apps' }[o.tls_mode] || o.tls_mode}</span></div>
         <div class="kv"><span class="k">Outgoing mail</span><span class="v">${o.relay ? 'Through an SMTP relay' : 'Delivered directly to recipients’ servers (port 25)'}</span><button class="btn sm outlined" id="test25">Test port 25</button></div>
@@ -381,36 +382,104 @@ async function domains(pane) {
 }
 
 // ---------------------------------------------------------------- queue
-async function queue(pane) {
-  const list = await api('/admin/queue');
-  const pill = (s) => ({ pending: html`<span class="pill blue">Sending</span>`, deferred: html`<span class="pill amber">Retrying</span>`, sent: html`<span class="pill green">Delivered</span>`, failed: html`<span class="pill red">Failed</span>` }[s]);
+let queueTimer = null;
+const QVIEWS = [['active', 'In queue'], ['retrying', 'Retrying'], ['failed', 'Failed'], ['sent', 'Delivered'], ['all', 'All']];
+
+async function queue(pane, state = { view: 'active', q: '' }) {
+  clearTimeout(queueTimer);
+  const res = await api(`/admin/queue?view=${state.view}&q=${encodeURIComponent(state.q)}`, { background: true });
+  if (!pane.isConnected) return;
+  const sm = res.summary;
+  const list = res.items;
+  const pill = (q) => q.sending ? html`<span class="pill blue">${icon('sync_alt', 'xs')}Sending</span>` : ({
+    pending: html`<span class="pill blue">Waiting</span>`, deferred: html`<span class="pill amber">Retrying</span>`,
+    sent: html`<span class="pill green">Delivered</span>`, failed: html`<span class="pill red">Failed</span>` }[q.status]);
+  const age = (ms) => {
+    if (!ms) return '—';
+    const m = Math.round((Date.now() - ms) / 60000);
+    return m < 1 ? 'just now' : m < 60 ? `${m} min` : m < 1440 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  };
   setHTML(pane, html`
-    <div class="section mt0" style="display:flex;align-items:center;gap:12px">
-      <div style="flex:1"><h2 style="margin:0">Delivery queue</h2><p class="lead" style="margin:0">Mail going to other servers. Temporary failures are retried for up to 4 days; the sender gets a bounce if delivery fails.</p></div>
-      <button class="icon-btn" id="q-refresh" data-tip="Refresh" aria-label="Refresh">${icon('refresh')}</button>
+    <div class="section mt0">
+      <div class="grid-stats">
+        <div class="stat"><div class="lbl">${icon('schedule', 's')}In queue</div><div class="num">${sm.waiting.toLocaleString()}</div><div class="sm">${sm.sending} sending now · ${sm.retrying} retrying</div></div>
+        <div class="stat"><div class="lbl">${icon('north_east', 's')}Delivered · 24h</div><div class="num">${sm.sent_24h.toLocaleString()}</div><div class="sm">${!sm.sent_24h ? 'Nothing sent yet' : sm.avg_send_ms < 1000 ? 'Under a second per delivery' : `About ${(sm.avg_send_ms / 1000).toFixed(1)} s per delivery`}</div></div>
+        <div class="stat"><div class="lbl">${icon('error', 's')}Failed · 24h</div><div class="num">${sm.failed_24h.toLocaleString()}</div><div class="sm">${sm.attempts_24h.toLocaleString()} delivery attempts</div></div>
+        <div class="stat"><div class="lbl">${icon('speed', 's')}Oldest waiting</div><div class="num">${sm.waiting ? age(sm.oldest_waiting) : '—'}</div><div class="sm">${sm.workers} parallel deliveries · ${sm.per_domain} per destination</div></div>
+      </div>
+      ${sm.destinations.length ? html`<p class="small muted q-dests">Waiting by destination: ${sm.destinations.map((d, i) => html`${i ? ' · ' : ''}<b>${d.domain}</b> ${d.waiting}`)}${sm.relay ? html` · sent through relay <b>${sm.relay}</b>` : ''}</p>` : ''}
     </div>
-    ${list.length ? html`<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Recipient</th><th>From</th><th>Status</th><th>Attempts</th><th>Details</th><th></th></tr></thead><tbody>
-      ${list.map((q) => html`<tr>
-        <td><b>${q.rcpt}</b><div class="small muted ellip">${q.subject || '(no subject)'}</div></td>
-        <td class="small">${q.sender || '<> (bounce)'}<div class="muted">${ago(q.created_at)}</div></td>
-        <td>${pill(q.status)}</td>
-        <td class="num">${q.attempts}</td>
-        <td class="small" style="max-width:360px">${q.last_error ? html`<span class="muted">${q.last_error}</span>` : ''}${q.status === 'deferred' ? html`<div class="muted">Next try ${ago(q.next_attempt)}</div>` : ''}</td>
-        <td class="num nowrap">${q.status === 'deferred' || q.status === 'pending' ? html`<button class="btn sm" data-retry="${q.id}">Retry now</button><button class="icon-btn sm" data-cancel="${q.id}" data-tip="Cancel" aria-label="Cancel">${icon('close')}</button>` : ''}</td>
-      </tr>`)}</tbody></table></div>` : html`<div class="panel"><div class="empty">${icon('check_circle')}<h3>Nothing in the queue</h3><p>All outgoing mail has been delivered.</p></div></div>`}`);
-  $('#q-refresh').onclick = () => queue(pane);
+    <div class="section">
+      <div class="q-bar">
+        <div class="chips" role="tablist">${QVIEWS.map(([id, label]) => html`<button class="chip ${state.view === id ? 'on' : ''}" data-view="${id}" role="tab" aria-selected="${state.view === id}">${label}</button>`)}</div>
+        <span class="spacer"></span>
+        <form class="q-search" id="q-search"><input name="q" value="${state.q}" placeholder="Search address or subject" aria-label="Search the queue" spellcheck="false"></form>
+        ${sm.retrying ? html`<button class="btn sm tonal" id="q-retry-all">${icon('refresh', 's')}Retry all now</button>` : ''}
+        <button class="icon-btn" id="q-refresh" data-tip="Refresh" aria-label="Refresh">${icon('refresh')}</button>
+      </div>
+      ${list.length ? html`<div class="tbl-wrap"><table class="tbl q-tbl"><thead><tr><th>Recipient</th><th>From</th><th>Status</th><th class="num">Tries</th><th>Details</th><th></th></tr></thead><tbody>
+        ${list.map((q) => html`<tr data-msg="${q.queue_id}" class="q-row">
+          <td><b>${q.rcpt}</b><div class="small muted ellip">${q.subject || '(no subject)'}</div></td>
+          <td class="small">${q.sender || '<> (bounce)'}<div class="muted">${ago(q.created_at)}</div></td>
+          <td>${pill(q)}</td>
+          <td class="num">${q.attempts}</td>
+          <td class="small q-detail">${q.last_error ? html`<span class="muted">${q.last_error}</span>` : q.status === 'sent' ? html`<span class="muted">Accepted ${ago(q.updated_at)}</span>` : ''}${q.status === 'deferred' && !q.sending ? html`<div class="muted">Next try ${ago(q.next_attempt)}</div>` : ''}</td>
+          <td class="num nowrap">${(q.status === 'deferred' || q.status === 'pending') && !q.sending ? html`<button class="btn sm" data-retry="${q.id}">Retry now</button><button class="icon-btn sm" data-cancel="${q.id}" data-tip="Stop delivery" aria-label="Stop delivery">${icon('close')}</button>` : ''}</td>
+        </tr>`)}</tbody></table></div>
+        <p class="small muted">Click a row to see every delivery attempt and the message headers.${list.length >= 200 ? ' Showing the latest 200 — search to find older ones.' : ''}</p>`
+      : html`<div class="panel"><div class="empty">${icon('check_circle')}<h3>${state.q ? 'Nothing matches your search' : state.view === 'active' ? 'Nothing in the queue' : 'Nothing here'}</h3><p>${state.view === 'active' && !state.q ? 'All outgoing mail has been delivered.' : 'Try another filter.'}</p></div></div>`}
+    </div>`);
+  const again = (patch = {}) => queue(pane, { ...state, ...patch }).catch(toastError);
+  pane.querySelectorAll('[data-view]').forEach((b) => (b.onclick = () => again({ view: b.dataset.view })));
+  $('#q-search').onsubmit = (e) => { e.preventDefault(); again({ q: e.target.q.value.trim() }); };
+  $('#q-refresh').onclick = () => again();
+  $('#q-retry-all')?.addEventListener('click', async () => {
+    try { const r = await api('/admin/queue/retry-all', { method: 'POST' }); snack(`Retrying ${plural(r.count, 'recipient')} now`); setTimeout(() => again(), 1200); } catch (er) { toastError(er); }
+  });
   pane.onclick = async (e) => {
     const r = e.target.closest('[data-retry]');
     const c = e.target.closest('[data-cancel]');
     try {
-      if (r) { await api(`/admin/queue/${r.dataset.retry}/retry`, { method: 'POST' }); snack('Retrying now'); setTimeout(() => queue(pane), 1500); }
+      if (r) { await api(`/admin/queue/${r.dataset.retry}/retry`, { method: 'POST' }); snack('Retrying now'); setTimeout(() => again(), 1200); return; }
       if (c) {
-        if (!(await confirmDialog('Stop delivery?', 'This message will not be delivered to this recipient.', 'Stop delivery', true))) return;
+        if (!(await confirmDialog('Stop delivery?', 'This message won\u2019t be delivered to this recipient, and no bounce is sent.', 'Stop delivery', true))) return;
         await api(`/admin/queue/${c.dataset.cancel}/cancel`, { method: 'POST' });
-        queue(pane);
+        again();
+        return;
       }
+      const row = e.target.closest('[data-msg]');
+      if (row && !e.target.closest('button')) queueMessage(+row.dataset.msg, again);
     } catch (er) { toastError(er); }
   };
+  // Live view while mail is moving.
+  if (sm.waiting > 0 || sm.sending > 0) queueTimer = setTimeout(() => { if (pane.isConnected) again(); }, 5000);
+}
+
+async function queueMessage(id, refresh) {
+  const d = await api(`/admin/queue/messages/${id}`);
+  const m = d.message;
+  const tone = { sent: 'green', failed: 'red', deferred: 'amber', pending: 'blue' };
+  const label = { sent: 'Delivered', failed: 'Failed', deferred: 'Retrying', pending: 'Waiting' };
+  const result = { sent: ['green', 'Delivered'], deferred: ['amber', 'Deferred'], failed: ['red', 'Failed'] };
+  dialog({
+    title: m.subject || '(no subject)', wide: true,
+    body: html`<div class="q-msg">
+      <div class="kv"><span class="k">From</span><span class="v">${m.sender || '<> (bounce)'}${m.user_email && m.user_email !== m.sender ? html` <span class="muted">· sent by ${m.user_email}</span>` : ''}</span></div>
+      <div class="kv"><span class="k">Queued</span><span class="v">${fullDate(m.created_at)} · ${bytes(m.size)}</span></div>
+      ${m.message_id ? html`<div class="kv"><span class="k">Message-ID</span><span class="v mono">${m.message_id}</span></div>` : ''}
+      <h3>Recipients</h3>
+      ${d.recipients.map((r) => html`<div class="q-rcpt"><b>${r.rcpt}</b><span class="pill ${r.sending ? 'blue' : tone[r.status]}">${r.sending ? 'Sending' : label[r.status]}</span><span class="muted small">${plural(r.attempts, 'try', 'tries')}${r.status === 'deferred' ? html` · next ${ago(r.next_attempt)}` : ''}</span>${r.last_error ? html`<div class="small muted">${r.last_error}</div>` : ''}</div>`)}
+      <h3>Delivery attempts</h3>
+      ${d.attempts.length ? html`<div class="q-attempts">${d.attempts.map((x) => html`<div class="q-att">
+        <span class="pill ${(result[x.result] || ['gray'])[0]}">${(result[x.result] || ['gray', x.result])[1]}</span>
+        <span class="small"><b>${x.rcpt}</b>${x.host ? html` via ${x.host}` : ''}<span class="muted"> · ${fullDate(x.at)}${x.ms ? ` · ${(x.ms / 1000).toFixed(1)} s` : ''}</span>${x.detail ? html`<div class="muted">${x.detail}</div>` : ''}</span>
+      </div>`)}</div>` : html`<p class="muted small">No attempts yet.</p>`}
+      ${m.headers ? html`<h3>Headers</h3><pre class="q-headers">${m.headers}</pre>` : ''}
+    </div>`,
+    actions: [{ label: 'Close', value: true, kind: 'filled' }],
+    onOpen: (dlg) => dlg.querySelector('.dlg-actions button')?.focus(), // not the scrollable headers box
+  });
+  void refresh;
 }
 
 // ---------------------------------------------------------------- activity log

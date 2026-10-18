@@ -3,6 +3,5 @@ data
 *.md
 !README.md
 tools
-third_party
 docker-compose*.yml
 .github

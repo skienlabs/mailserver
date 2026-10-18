@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -227,12 +229,61 @@ INSERT OR IGNORE INTO message_refs(user_id, ref, msg_id)
 DROP INDEX mail_log_ts;
 CREATE INDEX mail_log_ts ON mail_log(ts, direction, status);
 `,
+	// 4: importing mail from other providers (IMAP or exported files).
+	`
+CREATE TABLE imports (
+  id          INTEGER PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT '',
+  status      TEXT NOT NULL,
+  total       INTEGER NOT NULL DEFAULT 0,
+  imported    INTEGER NOT NULL DEFAULT 0,
+  skipped     INTEGER NOT NULL DEFAULT 0,
+  failed      INTEGER NOT NULL DEFAULT 0,
+  current     TEXT NOT NULL DEFAULT '',
+  message     TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  started_at  INTEGER NOT NULL DEFAULT 0,
+  finished_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX imports_user ON imports(user_id, id DESC);
+CREATE TABLE import_hashes (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hash    BLOB NOT NULL,
+  PRIMARY KEY (user_id, hash)
+) WITHOUT ROWID;
+`,
+	// 5: delivery attempt log for the admin's queue view.
+	`
+CREATE TABLE queue_attempts (
+  id       INTEGER PRIMARY KEY,
+  queue_id INTEGER NOT NULL REFERENCES queue(id) ON DELETE CASCADE,
+  rcpt_id  INTEGER NOT NULL,
+  rcpt     TEXT NOT NULL,
+  at       INTEGER NOT NULL,
+  host     TEXT NOT NULL DEFAULT '',
+  result   TEXT NOT NULL,
+  detail   TEXT NOT NULL DEFAULT '',
+  ms       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX queue_attempts_q  ON queue_attempts(queue_id, at);
+CREATE INDEX queue_attempts_at ON queue_attempts(at, result);
+CREATE INDEX queue_rcpts_upd   ON queue_rcpts(updated_at);
+`,
 }
 
 // OpenDB opens (and migrates) the SQLite database in dataDir.
 func OpenDB(dataDir string) (*sql.DB, error) {
 	path := filepath.Join(dataDir, "skienmail.db")
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=temp_store(MEMORY)&_txlock=immediate", path)
+	// Page cache per connection (SM_DB_CACHE_MB, default 64 MB; up to 8 connections) and a
+	// memory-mapped read window. Bigger servers can afford more; tiny ones can turn it down.
+	cacheMB := 64
+	if v, err := strconv.Atoi(os.Getenv("SM_DB_CACHE_MB")); err == nil && v >= 2 && v <= 4096 {
+		cacheMB = v
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=temp_store(MEMORY)"+
+		"&_pragma=cache_size(-%d)&_pragma=mmap_size(%d)&_txlock=immediate", path, cacheMB*1024, int64(cacheMB)*4<<20)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

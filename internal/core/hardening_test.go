@@ -32,6 +32,9 @@ func newTestApp(t *testing.T, withSMTP bool) (*App, *Domain, *User, *User) {
 			t.Fatal(err)
 		}
 		t.Cleanup(app.Shutdown)
+	} else {
+		// stop background work (imports) before the temp dir is removed
+		t.Cleanup(func() { app.cancel(); app.wg.Wait(); app.DB.Close() })
 	}
 	d, _ := app.CreateDomain("skien.test")
 	a, err := app.CreateUser(NewUser{Name: "Asi", Local: "asi", DomainID: d.ID, Password: "password-asi", Role: "admin"})

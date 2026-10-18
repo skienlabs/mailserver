@@ -15,6 +15,10 @@ import (
 // ProductName is shown in the UI, banners and generated messages.
 const ProductName = "Skien Mails"
 
+// Version is the release number (see CHANGELOG.md). Bump it with every release:
+// 1.0.0 → 1.0.1 for fixes and small additions, 1.1.0 for bigger features.
+var Version = "1.0.1"
+
 // App ties together storage, SMTP, delivery and the web server.
 type App struct {
 	Cfg      *Config
@@ -29,6 +33,8 @@ type App struct {
 
 	queueKick chan struct{}
 	limiter   *RateLimiter
+	imp       *importer
+	qd        *queueDispatcher
 
 	setupToken string
 
@@ -40,7 +46,7 @@ type App struct {
 // NewApp opens storage and prepares every subsystem (but starts nothing).
 func NewApp(cfg *Config, log *slog.Logger) (*App, error) {
 	for _, d := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, "mail"), filepath.Join(cfg.DataDir, "queue"),
-		filepath.Join(cfg.DataDir, "uploads"), filepath.Join(cfg.DataDir, "avatars"), filepath.Join(cfg.DataDir, "certs")} {
+		filepath.Join(cfg.DataDir, "uploads"), filepath.Join(cfg.DataDir, "avatars"), filepath.Join(cfg.DataDir, "certs"), filepath.Join(cfg.DataDir, "imports")} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			return nil, err
 		}
@@ -62,6 +68,8 @@ func NewApp(cfg *Config, log *slog.Logger) (*App, error) {
 		Events:    NewHub(),
 		queueKick: make(chan struct{}, 1),
 		limiter:   NewRateLimiter(),
+		imp:       newImporter(),
+		qd:        newQueueDispatcher(),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -131,6 +139,7 @@ func (a *App) Start() error {
 			a.Log.Error("TLS certificate could not be loaded, using a self-signed certificate until it can", "err", err)
 		}
 	}
+	a.recoverImports()
 	a.Go(a.queueWorker)
 	a.Go(a.janitor)
 	if err := a.startSMTP(); err != nil {

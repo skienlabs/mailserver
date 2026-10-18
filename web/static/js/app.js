@@ -34,8 +34,8 @@ async function boot() {
   }
   if (S.me.user.must_change_password) return auth.renderForceChange(root, S.me, boot);
   setCounts(S.me.counts);
+  await loadDirectory(); // small; loaded first so profile photos show on the first paint
   renderShell();
-  loadDirectory();
   connectEvents();
   route();
 }
@@ -177,6 +177,7 @@ function renderFoot() {
       ${quota ? html`<div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div>${bytes(u.used_bytes)} of ${bytes(quota)} used` : html`${bytes(u.used_bytes)} used`}
     </div>
     <div class="desktop-only" style="margin-top:10px">Shortcuts: <b>c</b> compose · <b>/</b> search · <b>?</b> help</div>
+    ${S.me.version ? html`<div class="version">Version ${S.me.version}</div>` : ''}
     <div class="copy">© 2026 Skien Software Labs</div>`);
 }
 
@@ -362,7 +363,12 @@ async function renderRail() {
     compose.open({ to: [{ email: p.email, name: p.name }] });
   });
 }
-bus.on('directory', () => renderRailSoon());
+bus.on('directory', () => {
+  renderRailSoon();
+  // photo added or changed: refresh the account button
+  const btn = $('#account-btn');
+  if (btn && S.me) setHTML(btn, avatar(S.me.user.name, S.me.user.email, 's32'));
+});
 
 // ---------------------------------------------------------------- live updates
 let es = null;

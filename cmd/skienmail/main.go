@@ -40,7 +40,7 @@ func main() {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
 	}
-	log.Info(core.ProductName+" is running", "hostname", app.Hostname())
+	log.Info(core.ProductName+" is running", "version", core.Version, "hostname", app.Hostname())
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -52,7 +52,7 @@ func main() {
 func runCommand(cfg *core.Config, args []string) int {
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Println(core.ProductName)
+		fmt.Println(core.ProductName, core.Version)
 		return 0
 	case "reset-password":
 		if len(args) != 2 {
