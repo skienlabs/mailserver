@@ -2,6 +2,12 @@
 
 Skien Mails uses simple version numbers: **1.0.1, 1.0.2 …** for fixes and small additions, **1.1.0** for bigger features. The running version is shown at the bottom of the side menu, in *Admin console → Overview*, and by `docker exec skienmail skienmail version`.
 
+## 1.1.1 — 21 October 2026
+
+- **New welcome page**: the sign-in screen now opens beside a short animated scene of the inbox at work (a message arrives, is starred, another is filed by a filter). On phones the form stays on the first screen; people who turn off animations see the finished picture.
+- **No more double copies in Sent** from mail apps: apps that send through Skien Mails and also upload their own copy to Sent (the Gmail app, Outlook, Apple Mail) keep one copy, in whichever order they do it and whether or not they include a Message-ID.
+- Mail-app commands that take more than 2 seconds are written to the server log ("slow mail-app command", with the account and the command), to tell server slowness from network or app delays.
+
 ## 1.1.0 — 18 October 2026
 
 - **Mail apps (IMAP)**: read and manage mail in Outlook, Apple Mail, Thunderbird and phone mail apps, on ports 993 (SSL/TLS) and 143 (STARTTLS). Folders, read status, stars, moves and deletes stay in sync with the web app, new mail shows up right away (IDLE), and *Settings → Email apps* lists the exact settings to type in. Mail apps need a real TLS certificate (README step 7). New settings `SM_IMAPS_ADDR` and `SM_IMAP_ADDR`; publish ports 993 and 143 in `docker-compose.yml` and the firewall.

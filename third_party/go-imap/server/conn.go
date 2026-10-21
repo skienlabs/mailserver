@@ -419,7 +419,11 @@ func (c *conn) serve(conn Conn) (err error) {
 				}
 			} else {
 				var err error
+				started := time.Now()
 				res, up, err = c.handleCommand(cmd)
+				if f := c.s.CommandDone; f != nil {
+					f(c.conn, cmd.Name, time.Since(started))
+				}
 				if err != nil {
 					res = &imap.StatusResp{
 						Tag:  cmd.Tag,

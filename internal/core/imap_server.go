@@ -81,6 +81,7 @@ func (a *App) startIMAP() {
 		}
 		s.MaxLiteralSizeAuthed = uint32(lim)
 		s.LiteralBudget = budget
+		s.CommandDone = a.imapCommandDone
 		s.IdlePoll = imapIdlePoll
 		s.ErrorLog = log.New(io.Discard, "", 0)
 		if a.Cfg.LogLevelDebug {
@@ -556,4 +557,18 @@ func (a *App) handleMailApps(w http.ResponseWriter, r *http.Request, u *User) {
 		"smtp_starttls": port(a.Cfg.SubmissionAddr),
 		"tls_mode":      a.TLS.Mode(),
 	})
+}
+
+// imapSlowCommand: commands taking longer are logged (IDLE waits by design and isn't counted).
+var imapSlowCommand = 2 * time.Second
+
+func (a *App) imapCommandDone(c imapserver.Conn, name string, took time.Duration) {
+	if took < imapSlowCommand || strings.EqualFold(name, "IDLE") {
+		return
+	}
+	user := ""
+	if u := c.Context().User; u != nil {
+		user = u.Username()
+	}
+	a.Log.Warn("slow mail-app command", "user", user, "command", name, "ms", took.Milliseconds())
 }

@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1157,3 +1159,33 @@ func TestIMAPLiteralBudgetPerAccountAndStall(t *testing.T) {
 		return false
 	})
 }
+
+// Slow mail-app commands are logged with the account and the command (IDLE never is).
+func TestIMAPSlowCommandLog(t *testing.T) {
+	app, _, a, _ := newTestApp(t, false)
+	var buf syncBuffer
+	app.Log = slog.New(slog.NewTextHandler(&buf, nil))
+	old := imapSlowCommand
+	imapSlowCommand = 0
+	t.Cleanup(func() { imapSlowCommand = old })
+	tlsAddr, _ := startIMAPTest(t, app)
+	c := imapDialT(t, tlsAddr, a.Email, "password-asi")
+	c.Select("INBOX", false)
+	c.Noop()
+	out := buf.String()
+	if !strings.Contains(out, `msg="slow mail-app command" user=`+a.Email+` command=SELECT`) || !strings.Contains(out, "command=NOOP") {
+		t.Fatalf("log: %s", out)
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+func (s *syncBuffer) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }

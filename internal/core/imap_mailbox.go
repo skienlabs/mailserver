@@ -902,15 +902,12 @@ func (m *imapMailbox) CreateMessage(flags []string, date time.Time, body imap.Li
 		}
 	} else {
 		meta := ParseMeta(raw)
-		if m.key == "sent" && meta.MessageID != "" {
-			// Apps upload a copy of what they just sent through our SMTP, which already saved
-			// one in Sent: keep just that one.
-			var dup int64
-			a.DB.QueryRow(`SELECT id FROM messages WHERE user_id=? AND message_id=? AND (folder='sent' OR prev_folder='sent') LIMIT 1`, userID, meta.MessageID).Scan(&dup)
-			if dup > 0 {
-				m.afterAppend()
-				return nil
-			}
+		// Apps upload a copy of what they just sent through our SMTP, which already saved one
+		// in Sent: keep just that one (matched by Message-ID, or by content when the app left
+		// the Message-ID out and our SMTP added it).
+		if m.key == "sent" && a.sentCopyOf(userID, raw, &meta, false) > 0 {
+			m.afterAppend()
+			return nil
 		}
 		id, err := a.Deliver(userID, raw, DeliverOpts{Folder: m.key, Meta: &meta, Seen: fl.seen || m.key == "sent", Flagged: fl.flagged, Answered: fl.answered,
 			ReceivedAt: received, AllowDuplicate: true, EnforceQuota: true})

@@ -128,6 +128,9 @@ type Server struct {
 	// limit). Several servers may share one budget; literals are released when their command
 	// finishes.
 	LiteralBudget *LiteralBudget
+	// Skien Mails patch: CommandDone, when set, is called after each command with how long it
+	// took (not counting the time to receive its literals), for spotting slow commands.
+	CommandDone func(c Conn, name string, took time.Duration)
 	// IdlePoll is how often a mailbox is polled during IDLE when it has no notifier (0 = 30s).
 	IdlePoll time.Duration
 }

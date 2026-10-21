@@ -149,7 +149,7 @@ In **Settings → Filters & blocked** (or from the side menu and a message's ⋮
 
 ### Mail apps (Outlook, Apple Mail, Thunderbird, phones)
 
-Each person finds their settings in **Settings → Email apps**: server `mail.skienlab.com`, IMAP on 993 (SSL/TLS) or 143 (STARTTLS), SMTP on 465 (SSL/TLS) or 587 (STARTTLS), username = email address, password = their Skien Mails password. Folders, read status, stars and moves stay in sync with the web app. Deleting in a mail app moves mail to Trash. Mail apps need a real TLS certificate (step 7), so set that up before announcing it.
+Each person finds their settings in **Settings → Email apps**: server `mail.skienlab.com`, IMAP on 993 (SSL/TLS) or 143 (STARTTLS), SMTP on 465 (SSL/TLS) or 587 (STARTTLS), username = email address, password = their Skien Mails password. Folders, read status, stars and moves stay in sync with the web app. Deleting in a mail app moves mail to Trash. Mail apps need a real TLS certificate (step 7), so set that up before announcing it. New mail shows up as fast as the app checks: Thunderbird and Apple Mail on a Mac are told about new mail at once (IMAP IDLE), while many phone apps, such as the Gmail app and iPhone Mail, check on a schedule (every 15 minutes by default in the Gmail app). For instant alerts on a phone, install Skien Mails from the browser and turn on notifications.
 
 ### Notifications when the app is closed
 

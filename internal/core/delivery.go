@@ -68,8 +68,21 @@ func (a *App) Submit(r SubmitReq) error {
 	}
 
 	if r.SaveSent && r.User != nil {
-		if _, err := a.Deliver(r.User.ID, r.Raw, DeliverOpts{Folder: "sent", Seen: true, Bcc: r.Bcc, Meta: r.Meta}); err != nil {
-			return fmt.Errorf("saving sent copy: %w", err)
+		// A mail app may have uploaded its own copy to Sent before sending: keep that one.
+		existing := int64(0)
+		if r.Via == "smtp" && r.Meta != nil {
+			existing = a.sentCopyOf(r.User.ID, r.Raw, r.Meta, false)
+			if existing == 0 {
+				// Its copy has no Message-ID (we added one): give it ours, so replies thread.
+				if existing = a.sentCopyOf(r.User.ID, r.Raw, &Meta{Subject: r.Meta.Subject}, true); existing > 0 && r.Meta.MessageID != "" {
+					a.DB.Exec(`UPDATE messages SET message_id=? WHERE id=? AND user_id=? AND message_id=''`, r.Meta.MessageID, existing, r.User.ID)
+				}
+			}
+		}
+		if existing == 0 {
+			if _, err := a.Deliver(r.User.ID, r.Raw, DeliverOpts{Folder: "sent", Seen: true, Bcc: r.Bcc, Meta: r.Meta}); err != nil {
+				return fmt.Errorf("saving sent copy: %w", err)
+			}
 		}
 	}
 

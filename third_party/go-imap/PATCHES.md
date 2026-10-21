@@ -45,6 +45,8 @@ Server side (the mail-app IMAP server), in `server/` and `backend/updates.go`:
 - **Tagged replies to unreadable commands**: a command refused while it was being read (for
   example a literal over a limit) gets a BAD with its own tag, not an untagged one the client
   doesn't recognise as the answer.
+- **Command timing** (`Server.CommandDone`): called after each command with its duration, so
+  the application can log slow ones.
 - **Ended sessions leave IDLE** (`backend.ErrSessionEnded`): when a poll during IDLE reports
   that the session has ended (password changed, account disabled), the server says BYE and
   disconnects instead of idling on.

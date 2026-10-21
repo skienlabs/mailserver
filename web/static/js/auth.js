@@ -17,16 +17,53 @@ function showError(root, msg) {
 function busy(btn, on) { btn.classList.toggle('busy', on); }
 
 // ---------------------------------------------------------------- sign in
+// The welcome scene beside the sign-in form: a small inbox that receives a message, notifies,
+// stars one and files another into a folder. Decorative (hidden from screen readers); the
+// motion plays once and is skipped entirely for people who prefer reduced motion.
+function welcomeScene(orgName) {
+  const row = (cls, initial, tint, name, subject, extra = '') => html`<div class="wl-row ${cls}">
+    <span class="wl-av" style="--tint:${tint}">${initial}</span>
+    <span class="wl-tx"><b>${name}</b><span>${subject}</span></span>${extra}</div>`;
+  return html`<section class="wl-scene" aria-labelledby="wl-title">
+    <div class="wl-glow a"></div><div class="wl-glow b"></div><div class="wl-glow c"></div>
+    <div class="wl-brand"><img src="/icons/favicon.svg" alt="" width="32" height="32"><span>Skien Mails</span></div>
+    <div class="wl-stage" aria-hidden="true">
+      <div class="wl-inbox">
+        <div class="wl-bar"><span>Inbox</span><span class="wl-badge">3 new</span></div>
+        ${row('r-new', 'R', '#7c6cf6', 'Ravi Menon', 'Quarterly report is ready', html`<span class="wl-dot"></span>`)}
+        ${row('r-star', 'P', '#e27fa9', 'Priya Nair', 'Notes from the design review', html`<span class="wl-star">${icon('star-f', 's')}</span>`)}
+        ${row('r-file', 'A', '#3f9cf0', 'Acme Ltd', 'Invoice 2041 for October', html`<span class="wl-chip">${icon('filter_alt', 'xs')}Clients/Acme</span>`)}
+        ${row('r-old', 'C', '#46b59a', 'Build bot', 'All checks passed on main')}
+        <div class="wl-note">${icon('filter_alt', 'xs')}Filed 1 message to Clients/Acme</div>
+      </div>
+      <div class="wl-folders">
+        <span class="wl-folder f-acme">${icon('folder', 'xs')}Clients/Acme</span>
+        <span class="wl-folder">${icon('folder', 'xs')}Invoices</span>
+        <span class="wl-folder">${icon('folder', 'xs')}Projects</span>
+      </div>
+      <div class="wl-toast"><img src="/icons/favicon.svg" alt="" width="28" height="28">
+        <span><b>Ravi Menon</b><span>Quarterly report is ready</span></span></div>
+    </div>
+    <div class="wl-copy">
+      <h2 id="wl-title">Mail that finds its own place.</h2>
+      <p>${orgName ? html`${orgName} mail` : 'Your mail'} on the web, on your phone and in the mail apps you already use. Filters sort it as it arrives, and new mail reaches you even when the app is closed.</p>
+    </div>
+  </section>`;
+}
+
 export async function renderLogin(root, done, notice = '') {
   let org = '';
   try { org = (await api('/setup', { background: true })).org; } catch { /* ignore */ }
   document.title = 'Sign in – Skien Mails';
-  setHTML(root, html`<div class="auth"><div>
-    <div class="auth-card">
-      <div>
+  const orgName = org && org !== 'Skien Mails' ? org : '';
+  setHTML(root, html`<div class="welcome">
+    ${welcomeScene(orgName)}
+    <main class="wl-side">
+      <div class="wl-form">
+      <div class="wl-head">
         <img class="logo" src="/icons/favicon.svg" alt="">
         <h1>Sign in</h1>
-        <p class="lead">to continue to ${org && org !== 'Skien Mails' ? html`<b>${org}</b> mail` : 'Skien Mails'}</p>
+        <p class="lead">to continue to ${orgName ? html`<b>${orgName}</b> mail` : 'Skien Mails'}</p>
       </div>
       <form id="login" novalidate>
         ${field({ label: 'Email or username', name: 'email', type: 'text', attrs: 'autocomplete="username" autocapitalize="off" spellcheck="false" autofocus', required: true })}
@@ -40,9 +77,10 @@ export async function renderLogin(root, done, notice = '') {
           <button type="submit" class="btn filled" id="login-btn">Next</button>
         </div>
       </form>
-    </div>
-    <div class="auth-foot"><span class="copy">© 2026 Skien Software Labs</span>${themeToggle()}</div>
-  </div></div>`);
+      </div>
+      <div class="auth-foot"><span class="copy">© 2026 Skien Software Labs</span>${themeToggle()}</div>
+    </main>
+  </div>`);
   wireFoot(root);
   passwordToggle(root);
   const form = $('#login', root);

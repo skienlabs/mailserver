@@ -17,7 +17,7 @@ const ProductName = "Skien Mails"
 
 // Version is the release number (see CHANGELOG.md). Bump it with every release:
 // 1.0.0 → 1.0.1 for fixes and small additions, 1.1.0 for bigger features.
-var Version = "1.1.0"
+var Version = "1.1.1"
 
 // App ties together storage, SMTP, delivery and the web server.
 type App struct {
