@@ -1,7 +1,7 @@
 // Notifications when the app is closed (Web Push). The server encrypts each notice for this
 // browser; the service worker (sw.js) shows it.
 import { api } from './lib.js';
-import { pref } from './state.js';
+import { pref, appName } from './state.js';
 
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
@@ -10,7 +10,7 @@ const standalone = () => matchMedia('(display-mode: standalone)').matches || nav
 export function pushSupport() {
   if (!window.isSecureContext || !('serviceWorker' in navigator)) return { ok: false, reason: 'Needs a secure (https) connection.' };
   if (isIOS() && !standalone()) {
-    return { ok: false, ios: true, reason: 'On iPhone and iPad, first add Skien Mails to your Home Screen (Share → Add to Home Screen), then open it from there and turn this on.' };
+    return { ok: false, ios: true, reason: `On iPhone and iPad, first add ${appName()} to your Home Screen (Share → Add to Home Screen), then open it from there and turn this on.` };
   }
   if (!('PushManager' in window) || !('Notification' in window)) return { ok: false, reason: "This browser doesn't support notifications while closed." };
   return { ok: true };

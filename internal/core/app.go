@@ -12,12 +12,9 @@ import (
 	"time"
 )
 
-// ProductName is shown in the UI, banners and generated messages.
-const ProductName = "Skien Mails"
-
 // Version is the release number (see CHANGELOG.md). Bump it with every release:
 // 1.0.0 → 1.0.1 for fixes and small additions, 1.1.0 for bigger features.
-var Version = "1.1.1"
+var Version = "1.2.0"
 
 // App ties together storage, SMTP, delivery and the web server.
 type App struct {
@@ -110,7 +107,7 @@ func (a *App) OrgName() string {
 	if n := a.Settings.Get(SetOrgName); n != "" {
 		return n
 	}
-	return ProductName
+	return a.AppName()
 }
 
 // MaxMessageBytes is the largest message accepted or sent.
@@ -135,7 +132,7 @@ func (a *App) Go(fn func(ctx context.Context)) {
 func (a *App) Start() error {
 	if !a.SetupDone() {
 		a.Log.Warn("organisation not set up yet — open the web UI to create it", "setup_token", a.setupToken)
-		fmt.Fprintf(os.Stderr, "\n  ==============================================\n    %s setup code:  %s\n    Open the web app and enter this code.\n  ==============================================\n\n", ProductName, a.setupToken)
+		fmt.Fprintf(os.Stderr, "\n  ==============================================\n    Your setup code:  %s\n    Open the web app and enter this code.\n  ==============================================\n\n", a.setupToken)
 	}
 	if a.Cfg.TLSCertFile != "" {
 		if _, err := a.TLS.loadFile(); err != nil {

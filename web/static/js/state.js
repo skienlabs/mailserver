@@ -63,6 +63,39 @@ export function parseRoute() {
   return { name: 'list', folder: 'inbox', page, params };
 }
 
+// ---------------------------------------------------------------- branding
+// Each server has its own name and main colour. The page arrives with both filled in (see
+// index.html); applyBrand keeps them current when an administrator changes them.
+const linkKey = () => (document.querySelector('link[rel~="icon"]')?.getAttribute('href') || '').match(/[?&]c=([0-9a-f]{6,10})/)?.[1] || '';
+export const brand = {
+  name: document.querySelector('meta[name="application-name"]')?.content || 'Mail',
+  icon: linkKey(),
+};
+export const appName = () => brand.name;
+export const iconURL = (file = 'mark.svg') => `/brand/${file}${brand.icon ? `?c=${brand.icon}` : ''}`;
+export function applyBrand(b) {
+  if (!b || typeof b !== 'object') return;
+  const before = brand.name + brand.icon;
+  if (typeof b.name === 'string' && b.name) brand.name = b.name;
+  if (/^[0-9a-f]{6,10}$/.test(b.icon || '')) brand.icon = b.icon;
+  const st = document.documentElement.style;
+  for (const [k, v] of Object.entries(b.vars || {})) {
+    if (/^--bd?-[a-z-]+$/.test(k) && /^#[0-9a-f]{6}$/i.test(v)) st.setProperty(k, v);
+  }
+  if (brand.icon) {
+    document.querySelectorAll('link[rel~="icon"], link[rel="apple-touch-icon"]').forEach((l) => {
+      l.setAttribute('href', l.getAttribute('href').replace(/([?&]c=)[0-9a-f]{6,10}/, `$1${brand.icon}`));
+    });
+  }
+  document.querySelector('meta[name="application-name"]')?.setAttribute('content', brand.name);
+  if (before !== brand.name + brand.icon) bus.emit('brand');
+}
+// brandLabel shows the last word lighter: "Softop Mails" -> <b>Softop</b> Mails.
+export function brandLabel(name = brand.name) {
+  const i = name.lastIndexOf(' ');
+  return i > 0 ? { strong: name.slice(0, i), rest: name.slice(i) } : { strong: name, rest: '' };
+}
+
 // ---------------------------------------------------------------- theme
 export function themePref() {
   try { return localStorage.getItem('sm.theme') || 'system'; } catch { return 'system'; }

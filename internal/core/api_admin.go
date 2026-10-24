@@ -484,7 +484,7 @@ func (a *App) handleAdminLog(w http.ResponseWriter, r *http.Request, u *User) {
 
 // ---------------------------------------------------------------- settings
 
-var editableSettings = []string{SetOrgName, SetHostname, SetRelayHost, SetRelayPort, SetRelayUser, SetRelayTLS,
+var editableSettings = []string{SetOrgName, SetAppName, SetAccent, SetHostname, SetRelayHost, SetRelayPort, SetRelayUser, SetRelayTLS,
 	SetMaxMessageMB, SetSpamThreshold, SetDNSBL, SetDefaultQuotaMB, SetTrashDays}
 
 func (a *App) handleAdminGetSettings(w http.ResponseWriter, r *http.Request, u *User) {
@@ -495,6 +495,10 @@ func (a *App) handleAdminGetSettings(w http.ResponseWriter, r *http.Request, u *
 	out["relay_pass_set"] = a.Settings.Get(SetRelayPass) != ""
 	out["hostname_locked"] = a.Cfg.Hostname != ""
 	out["tls_mode"] = a.TLS.Mode()
+	out[SetAppName] = a.AppName()
+	out[SetAccent] = a.Accent()
+	out["brand"] = a.brandInfo()
+	out["presets"] = AccentPresets
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -533,6 +537,22 @@ func (a *App) handleAdminSetSettings(w http.ResponseWriter, r *http.Request, u *
 	if v, ok := vals[SetOrgName]; ok && v == "" {
 		httpError(w, http.StatusBadRequest, "Organisation name can't be empty")
 		return
+	}
+	if v, ok := vals[SetAppName]; ok {
+		n, err := cleanAppName(v)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		vals[SetAppName] = n
+	}
+	if v, ok := vals[SetAccent]; ok {
+		c, good := normalizeAccent(v)
+		if !good {
+			httpError(w, http.StatusBadRequest, "Choose a main colour, like #4453f2")
+			return
+		}
+		vals[SetAccent] = c
 	}
 	if v, ok := vals[SetHostname]; ok {
 		v = strings.ToLower(v)

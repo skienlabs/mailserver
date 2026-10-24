@@ -1,7 +1,7 @@
 // Personal settings: profile, appearance, notifications, security, out-of-office, email apps.
 import { $, html, raw, icon, setHTML, api, upload, snack, avatar, ago, field, passwordToggle, toastError, squareImage, confirmDialog, dateOnly, copyText,
   selectField, bytes, plural, bus } from './lib.js';
-import { S, setTheme, themePref, navigate, pref, loadDirectory, loadFolders, folderPath } from './state.js';
+import { S, setTheme, themePref, navigate, pref, loadDirectory, loadFolders, folderPath, appName } from './state.js';
 import { cleanForEditor } from './compose.js';
 import { newFolderDialog, renameFolderDialog, deleteFolderDialog, filterDialog, unlistSender } from './folders.js';
 import { pushSupport, enablePush, disablePush, thisDevice } from './push.js';
@@ -52,7 +52,7 @@ function general(pane) {
           <div class="section" style="margin:20px 0 0">
             <h2 style="font-size:15px">Signature</h2>
             <p class="lead small">Added to new messages, replies and forwards.</p>
-            <div class="field" style="margin-top:0"><div id="sig" class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Signature" dir="auto" data-ph="e.g. Asi K · Skienlab · +91 98765 43210"
+            <div class="field" style="margin-top:0"><div id="sig" class="editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Signature" dir="auto" data-ph="e.g. Asi K · Acme Ltd · +91 98765 43210"
               style="border:1px solid var(--outline);border-radius:6px;padding:12px 16px;min-height:96px">${raw(cleanForEditor(u.signature))}</div></div>
           </div>
           <div class="form-actions"><button class="btn filled" type="submit">Save profile</button></div>
@@ -60,7 +60,7 @@ function general(pane) {
       </div>
     </div>
     <div class="section">
-      <h2>Appearance</h2><p class="lead">Choose how Skien Mails looks on this device.</p>
+      <h2>Appearance</h2><p class="lead">Choose how ${appName()} looks on this device.</p>
       <div class="panel" style="padding:16px 20px">
         <div class="seg" role="radiogroup" aria-label="Theme">
           ${[['light', 'light_mode', 'Light'], ['dark', 'dark_mode', 'Dark'], ['system', 'desktop_windows', 'System']].map(([v, ic, l]) => html`<button class="${theme === v ? 'on' : ''}" data-theme-pick="${v}" role="radio" aria-checked="${theme === v}">${icon(ic, 's')}${l}</button>`)}
@@ -70,7 +70,7 @@ function general(pane) {
     <div class="section">
       <h2>Notifications</h2>
       <div class="panel" style="padding:4px 20px">
-        <label class="kv check" style="width:100%"><span class="v"><b>Desktop notifications</b><br><span class="muted small">Get a notification when new mail arrives while Skien Mails is open in the background.</span></span>
+        <label class="kv check" style="width:100%"><span class="v"><b>Desktop notifications</b><br><span class="muted small">Get a notification when new mail arrives while ${appName()} is open in the background.</span></span>
           <input type="checkbox" class="switch" id="notify" ${notifyOn ? raw('checked') : ''}></label>
         <div id="push-box"></div>
       </div>
@@ -78,8 +78,8 @@ function general(pane) {
     <div class="section">
       <h2>Install the app</h2>
       <div class="panel" style="padding:16px 20px">
-        <p class="mt0">Use Skien Mails like a desktop app — its own window, taskbar icon, unread badge, and it opens <b>mailto:</b> links.</p>
-        ${S.installPrompt ? html`<button class="btn filled" id="install">${icon('install_desktop')}Install Skien Mails</button>`
+        <p class="mt0">Use ${appName()} like a desktop app — its own window, taskbar icon, unread badge, and it opens <b>mailto:</b> links.</p>
+        ${S.installPrompt ? html`<button class="btn filled" id="install">${icon('install_desktop')}Install ${appName()}</button>`
           : html`<p class="muted small" style="margin-bottom:4px">In <b>Microsoft Edge</b> or <b>Google Chrome</b> on Windows, click the install icon (${icon('install_desktop', 'xs')}) at the right of the address bar, or open the browser menu → <b>Apps</b> → <b>Install this site as an app</b>. On a phone, use <b>Add to Home screen</b>.</p>`}
       </div>
     </div>`);
@@ -143,7 +143,7 @@ function general(pane) {
 async function renderPushBox(box) {
   if (!box) return;
   const sup = pushSupport();
-  const title = html`<b>When Skien Mails is closed</b>`;
+  const title = html`<b>When ${appName()} is closed</b>`;
   if (!sup.ok) {
     setHTML(box, html`<div class="kv"><span class="v">${title}<br><span class="muted small">${sup.reason}</span></span></div>`);
     return;
@@ -473,7 +473,7 @@ function renderApps(pane, info) {
   setHTML(pane, html`
     <div class="section">
       <h2>Use Outlook, Apple Mail, Thunderbird or your phone</h2>
-      <p class="lead">Add your Skien Mails account to any mail app that supports IMAP. Mail, folders, read status and stars stay in sync with this web app.</p>
+      <p class="lead">Add your ${appName()} account to any mail app that supports IMAP. Mail, folders, read status and stars stay in sync with this web app.</p>
       ${selfSigned ? html`<div class="banner warn" role="note">${icon('warning', 's')}<span class="grow">This server doesn't have a trusted security certificate yet, so mail apps will show a warning or refuse to connect. Ask your administrator to set one up.</span></div>` : ''}
       ${imapOn ? '' : html`
         <div class="banner" role="note">${icon('info', 's')}<span class="grow">Mail-app access (IMAP) isn't turned on for this server. Ask your administrator. You can still send from other apps with the settings below.</span></div>`}
@@ -485,7 +485,7 @@ function renderApps(pane, info) {
           ${row('Server', host, host)}
           ${row('Port', ports(info.imap_ssl, info.imap_starttls))}
           ${row('Username', info.username, info.username)}
-          ${row('Password', 'Your Skien Mails password')}
+          ${row('Password', `Your ${appName()} password`)}
         </div>
     </div>` : ''}
     ${smtpOn ? html`
@@ -496,7 +496,7 @@ function renderApps(pane, info) {
         ${row('Server', host, host)}
         ${row('Port', ports(info.smtp_ssl, info.smtp_starttls))}
         ${row('Username', info.username, info.username)}
-        ${row('Password', 'Your Skien Mails password')}
+        ${row('Password', `Your ${appName()} password`)}
         ${row('Authentication', 'Required · normal password')}
       </div>
     </div>` : ''}
@@ -515,9 +515,9 @@ function renderApps(pane, info) {
       </div>
     </div>` : ''}
     <div class="section">
-      <h2>Or install Skien Mails as an app</h2>
+      <h2>Or install ${appName()} as an app</h2>
       <div class="panel" style="padding:16px 20px">
-        <p class="mt0">Open <b>https://${host}</b> and install Skien Mails as an app — it works on Windows, macOS, Android and iPhone, stays signed in, and shows new-mail notifications.</p>
+        <p class="mt0">Open <b>https://${host}</b> and install ${appName()} as an app — it works on Windows, macOS, Android and iPhone, stays signed in, and shows new-mail notifications.</p>
         <a class="btn tonal" href="#/settings/general">${icon('install_desktop')}Install options</a>
       </div>
     </div>`);
@@ -555,7 +555,7 @@ function importMail(pane) {
   setHTML(pane, html`
     <div class="section">
       <h2>Import from another account</h2>
-      <p class="lead">Copy your old mail into Skien Mails directly from Zoho, Gmail or any provider with IMAP. Your old account isn't changed, and folders, read status, stars and original dates are kept.</p>
+      <p class="lead">Copy your old mail into ${appName()} directly from Zoho, Gmail or any provider with IMAP. Your old account isn't changed, and folders, read status, stars and original dates are kept.</p>
       <div class="panel imp-panel">
         <form id="imp-form" autocomplete="off">
           <div class="row2">
@@ -605,7 +605,7 @@ function importMail(pane) {
     </div>
     <div class="section">
       <h2>Export your mail</h2>
-      <p class="lead">Download a copy of your mail as a .zip: one folder per mail folder, one .eml file per message. It opens in Outlook, Apple Mail or Thunderbird, and can be imported into Skien Mails or another service.</p>
+      <p class="lead">Download a copy of your mail as a .zip: one folder per mail folder, one .eml file per message. It opens in Outlook, Apple Mail or Thunderbird, and can be imported into ${appName()} or another service.</p>
       <div class="panel" style="padding:12px 20px" id="exp-panel"><div class="center-fill" style="padding:16px"><div class="spinner"></div></div></div>
     </div>`);
   loadExport();
@@ -834,7 +834,7 @@ async function uploadInChunks(file, signal, onProgress) {
         continue;
       }
       if (res.status === 401) { bus.emit('unauthorized'); throw new Error('You were signed out.'); }
-      if (res.status === 413) throw new Error('The web server in front of Skien Mails refused the upload size. Ask your administrator to raise its upload limit.');
+      if (res.status === 413) throw new Error(`The web server in front of ${appName()} refused the upload size. Ask your administrator to raise its upload limit.`);
       if (!res.ok) {
         if (res.status >= 500 && ++tries <= 6) { await wait(1000 * tries); continue; }
         throw new Error(data.error || `Upload failed (${res.status})`);

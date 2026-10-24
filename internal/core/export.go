@@ -18,8 +18,6 @@ import (
 // streamed straight to the browser (nothing is staged on disk). The layout is the one the
 // importer understands, so an export can be imported here or elsewhere.
 
-const exportTop = "Skien Mails export"
-
 const exportAppDrafts = "imap-drafts" // export key for drafts saved by mail apps (imap_drafts)
 
 var exportState = struct {
@@ -109,6 +107,9 @@ func (a *App) handleExportFolders(w http.ResponseWriter, r *http.Request, u *Use
 	writeJSON(w, http.StatusOK, list)
 }
 
+// exportTop is the folder that holds everything in an export: "Softop Mails export".
+func (a *App) exportTop() string { return zipSafe(a.AppName() + " export") }
+
 // zipSafe makes one path level safe on every operating system (Windows is the strictest).
 func zipSafe(s string) string {
 	s = strings.Map(func(r rune) rune {
@@ -177,6 +178,7 @@ func (a *App) handleExport(w http.ResponseWriter, r *http.Request, u *User) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	rc := http.NewResponseController(w)
 
+	top := a.exportTop()
 	zw := zip.NewWriter(w)
 	zw.RegisterCompressor(zip.Deflate, func(out io.Writer) (io.WriteCloser, error) { return flate.NewWriter(out, flate.BestSpeed) })
 	var index strings.Builder
@@ -186,7 +188,7 @@ func (a *App) handleExport(w http.ResponseWriter, r *http.Request, u *User) {
 	used := map[string]bool{}
 	ctx := r.Context()
 	for _, f := range chosen {
-		dir := exportTop + "/"
+		dir := top + "/"
 		for _, part := range strings.Split(f.Name, "/") {
 			dir += zipSafe(part) + "/"
 		}
@@ -261,12 +263,12 @@ func (a *App) handleExport(w http.ResponseWriter, r *http.Request, u *User) {
 					return
 				}
 				written++
-				cw.Write([]string{f.Name, strings.TrimPrefix(dir+file, exportTop+"/"), when.Format(time.RFC3339), it.from, it.subject, yesNo(it.seen), yesNo(it.flagged)})
+				cw.Write([]string{f.Name, strings.TrimPrefix(dir+file, top+"/"), when.Format(time.RFC3339), it.from, it.subject, yesNo(it.seen), yesNo(it.flagged)})
 			}
 		}
 	}
 	cw.Flush()
-	if fw, err := zw.CreateHeader(&zip.FileHeader{Name: exportTop + "/messages.csv", Method: zip.Deflate, Modified: time.Now()}); err == nil {
+	if fw, err := zw.CreateHeader(&zip.FileHeader{Name: top + "/messages.csv", Method: zip.Deflate, Modified: time.Now()}); err == nil {
 		io.WriteString(fw, index.String())
 	}
 	readme := fmt.Sprintf("Mail exported from %s for %s on %s.\r\n\r\n"+
@@ -274,11 +276,11 @@ func (a *App) handleExport(w http.ResponseWriter, r *http.Request, u *User) {
 		"Open .eml files with Outlook, Apple Mail or Thunderbird, or import this .zip into another mail service.\r\n"+
 		"To bring it back into %s: Settings > Import & export > Import from a file.\r\n"+
 		"messages.csv lists every message with its folder, date, sender, subject and read/starred status.\r\n\r\n"+
-		"Messages: %d\r\n", a.OrgName(), u.Email, time.Now().Format("2 January 2006 15:04"), ProductName, written)
+		"Messages: %d\r\n", a.OrgName(), u.Email, time.Now().Format("2 January 2006 15:04"), a.AppName(), written)
 	if missing > 0 {
 		readme += fmt.Sprintf("Messages whose file could not be read on the server (left out): %d\r\n", missing)
 	}
-	if fw, err := zw.CreateHeader(&zip.FileHeader{Name: exportTop + "/README.txt", Method: zip.Deflate, Modified: time.Now()}); err == nil {
+	if fw, err := zw.CreateHeader(&zip.FileHeader{Name: top + "/README.txt", Method: zip.Deflate, Modified: time.Now()}); err == nil {
 		io.WriteString(fw, readme)
 	}
 	if err := zw.Close(); err != nil {

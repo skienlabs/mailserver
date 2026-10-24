@@ -153,7 +153,8 @@ func (a *App) mePayload(u *User) map[string]any {
 		"counts":   a.FolderCounts(u.ID),
 		"org":      map[string]any{"name": a.OrgName(), "hostname": a.Hostname(), "domains": domains},
 		"max_size": a.MaxMessageBytes(),
-		"product":  ProductName,
+		"product":  a.AppName(),
+		"brand":    a.brandInfo(),
 		"version":  Version,
 	}
 }
@@ -165,7 +166,8 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request, u *User) {
 // ---------------------------------------------------------------- first-run setup
 
 func (a *App) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"needs_setup": !a.SetupDone(), "org": a.OrgName(), "product": ProductName})
+	writeJSON(w, http.StatusOK, map[string]any{"needs_setup": !a.SetupDone(), "org": a.OrgName(), "product": a.AppName(), "brand": a.brandInfo(),
+		"presets": AccentPresets})
 }
 
 func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +187,8 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Name     string `json:"name"`
 		Local    string `json:"local"`
 		Password string `json:"password"`
+		AppName  string `json:"app_name"`
+		Accent   string `json:"accent"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -203,13 +207,28 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "Enter the web address of this server, like mail.example.com")
 		return
 	}
+	if strings.TrimSpace(in.AppName) == "" {
+		in.AppName = defaultAppName(in.OrgName)
+	}
+	appName, err := cleanAppName(in.AppName)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	accent := DefaultAccent
+	if strings.TrimSpace(in.Accent) != "" {
+		var ok bool
+		if accent, ok = normalizeAccent(in.Accent); !ok {
+			httpError(w, http.StatusBadRequest, "Choose a main colour, like #4453f2")
+			return
+		}
+	}
 	if err := ValidatePassword(in.Password); err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	d := a.Domain(in.Domain)
 	if d == nil {
-		var err error
 		d, err = a.CreateDomain(in.Domain)
 		if err != nil {
 			httpError(w, http.StatusBadRequest, err.Error())
@@ -222,11 +241,11 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := a.Settings.Set(map[string]string{SetOrgName: in.OrgName, SetHostname: in.Hostname, SetSetupDone: "1"}); err != nil {
+	if err := a.Settings.Set(map[string]string{SetOrgName: in.OrgName, SetHostname: in.Hostname, SetAppName: appName, SetAccent: accent, SetSetupDone: "1"}); err != nil {
 		a.internalError(w, err)
 		return
 	}
-	a.Log.Info("organisation created", "org", in.OrgName, "domain", d.Name, "admin", u.Email)
+	a.Log.Info("organisation created", "org", in.OrgName, "app", appName, "domain", d.Name, "admin", u.Email)
 	go a.RestartSMTP() // pick up the new hostname for banners and TLS
 	if err := a.createSession(w, r, u.ID, true); err != nil {
 		a.internalError(w, err)

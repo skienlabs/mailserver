@@ -1,7 +1,10 @@
 // Sign-in, first-run organisation setup, and forced password change screens.
 import { $, html, icon, setHTML, api, field, passwordToggle, snack, dialog } from './lib.js';
-import { setTheme } from './state.js';
+import { setTheme, appName, iconURL, applyBrand } from './state.js';
 import { beforeSignOut } from './push.js';
+import { colourPicker, wireColourPicker, markSVG } from './brandui.js';
+
+const COPYRIGHT = '© 2026 Skien Software Labs';
 
 function themeToggle() {
   return html`<button type="button" id="auth-theme">${icon('dark_mode', 's')} Theme</button>`;
@@ -21,19 +24,18 @@ function busy(btn, on) { btn.classList.toggle('busy', on); }
 // stars one and files another into a folder. Decorative (hidden from screen readers); the
 // motion plays once and is skipped entirely for people who prefer reduced motion.
 function welcomeScene(orgName) {
-  const row = (cls, initial, tint, name, subject, extra = '') => html`<div class="wl-row ${cls}">
-    <span class="wl-av" style="--tint:${tint}">${initial}</span>
+  const row = (cls, initial, name, subject, extra = '') => html`<div class="wl-row ${cls}">
+    <span class="wl-av">${initial}</span>
     <span class="wl-tx"><b>${name}</b><span>${subject}</span></span>${extra}</div>`;
   return html`<section class="wl-scene" aria-labelledby="wl-title">
-    <div class="wl-glow a"></div><div class="wl-glow b"></div><div class="wl-glow c"></div>
-    <div class="wl-brand"><img src="/icons/favicon.svg" alt="" width="32" height="32"><span>Skien Mails</span></div>
+    <div class="wl-brand"><img src="${iconURL()}" alt="" width="32" height="32"><span>${appName()}</span></div>
     <div class="wl-stage" aria-hidden="true">
       <div class="wl-inbox">
         <div class="wl-bar"><span>Inbox</span><span class="wl-badge">3 new</span></div>
-        ${row('r-new', 'R', '#7c6cf6', 'Ravi Menon', 'Quarterly report is ready', html`<span class="wl-dot"></span>`)}
-        ${row('r-star', 'P', '#e27fa9', 'Priya Nair', 'Notes from the design review', html`<span class="wl-star">${icon('star-f', 's')}</span>`)}
-        ${row('r-file', 'A', '#3f9cf0', 'Acme Ltd', 'Invoice 2041 for October', html`<span class="wl-chip">${icon('filter_alt', 'xs')}Clients/Acme</span>`)}
-        ${row('r-old', 'C', '#46b59a', 'Build bot', 'All checks passed on main')}
+        ${row('r-new', 'R', 'Ravi Menon', 'Quarterly report is ready', html`<span class="wl-dot"></span>`)}
+        ${row('r-star', 'P', 'Priya Nair', 'Notes from the design review', html`<span class="wl-star">${icon('star-f', 's')}</span>`)}
+        ${row('r-file', 'A', 'Acme Ltd', 'Invoice 2041 for October', html`<span class="wl-chip">${icon('filter_alt', 'xs')}Clients/Acme</span>`)}
+        ${row('r-old', 'C', 'Build bot', 'All checks passed on main')}
         <div class="wl-note">${icon('filter_alt', 'xs')}Filed 1 message to Clients/Acme</div>
       </div>
       <div class="wl-folders">
@@ -41,7 +43,7 @@ function welcomeScene(orgName) {
         <span class="wl-folder">${icon('folder', 'xs')}Invoices</span>
         <span class="wl-folder">${icon('folder', 'xs')}Projects</span>
       </div>
-      <div class="wl-toast"><img src="/icons/favicon.svg" alt="" width="28" height="28">
+      <div class="wl-toast"><img src="${iconURL()}" alt="" width="28" height="28">
         <span><b>Ravi Menon</b><span>Quarterly report is ready</span></span></div>
     </div>
     <div class="wl-copy">
@@ -53,17 +55,21 @@ function welcomeScene(orgName) {
 
 export async function renderLogin(root, done, notice = '') {
   let org = '';
-  try { org = (await api('/setup', { background: true })).org; } catch { /* ignore */ }
-  document.title = 'Sign in – Skien Mails';
-  const orgName = org && org !== 'Skien Mails' ? org : '';
+  try {
+    const st = await api('/setup', { background: true });
+    applyBrand(st.brand);
+    org = st.org || '';
+  } catch { /* ignore */ }
+  document.title = `Sign in – ${appName()}`;
+  const orgName = org && org !== appName() ? org : '';
   setHTML(root, html`<div class="welcome">
     ${welcomeScene(orgName)}
     <main class="wl-side">
       <div class="wl-form">
       <div class="wl-head">
-        <img class="logo" src="/icons/favicon.svg" alt="">
+        <img class="logo" src="${iconURL()}" alt="">
         <h1>Sign in</h1>
-        <p class="lead">to continue to ${orgName ? html`<b>${orgName}</b> mail` : 'Skien Mails'}</p>
+        <p class="lead">to continue to <b>${appName()}</b></p>
       </div>
       <form id="login" novalidate>
         ${field({ label: 'Email or username', name: 'email', type: 'text', attrs: 'autocomplete="username" autocapitalize="off" spellcheck="false" autofocus', required: true })}
@@ -78,7 +84,7 @@ export async function renderLogin(root, done, notice = '') {
         </div>
       </form>
       </div>
-      <div class="auth-foot"><span class="copy">© 2026 Skien Software Labs</span>${themeToggle()}</div>
+      <div class="auth-foot"><span class="copy">${COPYRIGHT}</span>${themeToggle()}</div>
     </main>
   </div>`);
   wireFoot(root);
@@ -111,25 +117,63 @@ export async function renderLogin(root, done, notice = '') {
 }
 
 // ---------------------------------------------------------------- first-run setup
-export function renderSetup(root, done) {
-  document.title = 'Set up – Skien Mails';
-  const data = { org_name: '', domain: '', hostname: location.hostname === 'localhost' ? '' : location.hostname, name: '', local: '', password: '', confirm: '', token: '' };
+const DEFAULT_PRESETS = ['#4453f2', '#0b57d0', '#0f766e', '#15803d', '#b45309', '#c2410c', '#be123c', '#7c3aed', '#334155'];
+
+export function renderSetup(root, done, st = {}) {
+  const presets = Array.isArray(st.presets) && st.presets.length ? st.presets : DEFAULT_PRESETS;
+  const data = {
+    org_name: '', domain: '', hostname: location.hostname === 'localhost' ? '' : location.hostname,
+    app_name: '', accent: st.brand?.accent || presets[0],
+    name: '', local: '', password: '', confirm: '', token: '',
+  };
+  let nameEdited = false; // the app name follows the organisation name until it is typed in
+  let vars = st.brand?.vars || null;
+  // the same rules as the server: "<organisation> Mails", or the organisation's name when that's too long
+  const chars = (s) => [...s].length;
+  const suggested = () => {
+    const org = data.org_name.trim().replace(/\s+/g, ' ');
+    if (!org) return '';
+    return chars(`${org} Mails`) <= 40 ? `${org} Mails` : [...org].slice(0, 40).join('').trim();
+  };
   let step = 0;
 
   const steps = [
     {
       title: 'Your organisation',
       body: () => html`
-        ${field({ label: 'Organisation name', name: 'org_name', value: data.org_name, attrs: 'autofocus autocomplete="organization"' })}
-        ${field({ label: 'Email domain', name: 'domain', value: data.domain, hint: 'The part after @ in everyone’s address — for example skien.com', attrs: 'autocapitalize="off" spellcheck="false"' })}
-        ${field({ label: 'Web address of this server', name: 'hostname', value: data.hostname, hint: 'Where people open Skien Mails, and the name mail servers connect to — for example mail.skienlab.com', attrs: 'autocapitalize="off" spellcheck="false"' })}`,
+        ${field({ label: 'Organisation name', name: 'org_name', value: data.org_name, attrs: 'autofocus autocomplete="organization" maxlength="100"' })}
+        ${field({ label: 'Email domain', name: 'domain', value: data.domain, hint: 'The part after @ in everyone’s address — for example example.com', attrs: 'autocapitalize="off" spellcheck="false"' })}
+        ${field({ label: 'Web address of this server', name: 'hostname', value: data.hostname, hint: 'Where people open the web app, and the name mail servers connect to — for example mail.example.com', attrs: 'autocapitalize="off" spellcheck="false"' })}`,
       check: () => {
         data.domain = data.domain.toLowerCase().replace(/^@/, '').trim();
         data.hostname = data.hostname.toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').trim();
         if (!data.org_name.trim()) return 'Enter your organisation name';
-        if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/.test(data.domain)) return 'Enter a domain like skien.com';
-        if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/.test(data.hostname)) return 'Enter a web address like mail.skienlab.com';
+        if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/.test(data.domain)) return 'Enter a domain like example.com';
+        if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/.test(data.hostname)) return 'Enter a web address like mail.example.com';
+        if (!nameEdited) data.app_name = suggested();
         return '';
+      },
+    },
+    {
+      title: 'Name and colour',
+      body: () => html`
+        <p class="muted mt0">This is what everyone sees: on the sign-in page, in the browser tab, on the app icon and in notifications. You can change both later in Admin console › Server settings.</p>
+        ${field({ label: 'App name', name: 'app_name', value: data.app_name, attrs: 'autofocus maxlength="40" autocomplete="off"', hint: 'For example “Softop Mails”' })}
+        <div class="fld-label">Main colour</div>
+        ${colourPicker(data.accent, presets)}
+        <div class="brand-preview" id="brand-preview">${previewCard()}</div>`,
+      check: () => {
+        data.app_name = data.app_name.replace(/\s+/g, ' ').trim();
+        if (!data.app_name) return 'Enter a name for the app';
+        if (chars(data.app_name) > 40) return 'Keep the app name to 40 characters or fewer';
+        if (/[<>"\\/]|[\p{Cc}\p{Cf}]/u.test(data.app_name)) return 'The app name can’t contain < > " / or \\';
+        if (!/^#[0-9a-f]{6}$/i.test(data.accent)) return 'Choose a main colour';
+        return '';
+      },
+      wire: (form) => {
+        const nm = form.querySelector('[name=app_name]');
+        nm.addEventListener('input', () => { nameEdited = true; data.app_name = nm.value; repaintPreview(); });
+        wireColourPicker(form, (c, v) => { data.accent = c; vars = v; repaintPreview(); });
       },
     },
     {
@@ -153,30 +197,42 @@ export function renderSetup(root, done) {
       title: 'Confirm it’s you',
       body: () => html`
         <p class="muted mt0">To make sure only the server owner can create the organisation, enter the setup code printed in the server log.</p>
-        <div class="cred-box">docker logs skienmail 2>&1 | grep "setup code"</div>
+        <div class="cred-box">docker logs skienmail 2>&1 | grep -i "setup code"</div>
         ${field({ label: 'Setup code', name: 'token', value: data.token, attrs: 'autofocus autocapitalize="characters" spellcheck="false" autocomplete="one-time-code"' })}
-        <div class="panel" style="margin-top:16px;padding:12px 16px">
-          <div class="small muted">You're creating</div>
-          <div><b>${data.org_name}</b> · ${data.local}@${data.domain}</div>
-          <div class="small muted">Web address: ${data.hostname}</div>
+        <div class="panel summary">
+          <span class="summary-mark">${markSVG(vars, 36)}</span>
+          <div><div><b>${data.app_name}</b> for ${data.org_name}</div>
+          <div class="small muted">${data.local}@${data.domain} · ${data.hostname}</div></div>
         </div>`,
       check: () => (data.token.trim() ? '' : 'Enter the setup code'),
     },
   ];
 
+  function previewCard() {
+    return html`${markSVG(vars, 40)}<div class="bp-text"><b>${data.app_name || 'Your app name'}</b><span>Sign in to continue</span></div>
+      <span class="bp-btn">Next</span>`;
+  }
+  function repaintPreview() {
+    const p = $('#brand-preview', root);
+    if (p) setHTML(p, previewCard());
+    const m = $('#setup-mark', root);
+    if (m) setHTML(m, markSVG(vars, 40));
+  }
+
   const paint = () => {
     const s = steps[step];
+    document.title = `Set up – ${data.app_name || appName()}`;
     setHTML(root, html`<div class="auth"><div>
       <div class="auth-card">
         <div>
-          <img class="logo" src="/icons/favicon.svg" alt="">
-          <h1>Welcome to Skien Mails</h1>
-          <p class="lead">Let's set up email for your organisation. It takes about a minute.</p>
+          <span id="setup-mark">${markSVG(vars, 40)}</span>
+          <h1>Set up your mail server</h1>
+          <p class="lead">Email for your organisation, on your own server. It takes about a minute.</p>
           <div class="steps">${steps.map((_, i) => html`<i class="${i <= step ? 'on' : ''}"></i>`)}</div>
           <ul class="checklist">
             <li>${icon('check_circle', 's')}<span>Mailboxes like <b>name@${data.domain || 'yourdomain.com'}</b> for every employee</span></li>
             <li>${icon('check_circle', 's')}<span>Signed (DKIM) and verified (SPF, DMARC) mail out of the box</span></li>
-            <li>${icon('check_circle', 's')}<span>Works in the browser and installs as an app on Windows, Mac and phones</span></li>
+            <li>${icon('check_circle', 's')}<span>Your name and colour, in the browser and as an app on computers and phones</span></li>
           </ul>
         </div>
         <form id="setup" novalidate>
@@ -190,25 +246,27 @@ export function renderSetup(root, done) {
           </div>
         </form>
       </div>
-      <div class="auth-foot"><span class="copy">© 2026 Skien Software Labs</span>${themeToggle()}</div>
+      <div class="auth-foot"><span class="copy">${COPYRIGHT}</span>${themeToggle()}</div>
     </div></div>`);
     wireFoot(root);
     passwordToggle(root);
     const form = $('#setup', root);
-    form.querySelectorAll('input').forEach((i) => i.addEventListener('input', () => { data[i.name] = i.value; }));
+    form.querySelectorAll('input:not([type=color]):not([type=hidden])').forEach((i) => i.addEventListener('input', () => { data[i.name] = i.value; }));
+    s.wire?.(form);
     const first = form.querySelector('[autofocus]');
     first?.focus();
-    $('#back', root)?.addEventListener('click', () => { step--; paint(); });
+    $('#back', root)?.addEventListener('click', () => { collect(form); step--; paint(); });
     form.onsubmit = async (e) => {
       e.preventDefault();
-      form.querySelectorAll('input').forEach((i) => { data[i.name] = i.value; });
+      collect(form);
       const err = s.check();
       if (err) return showError(root, err);
       if (step < steps.length - 1) { step++; return paint(); }
       const btn = $('#next', root);
       busy(btn, true);
       try {
-        await api('/setup', { method: 'POST', body: { ...data, token: data.token.trim() } });
+        const { confirm, ...body } = data;
+        await api('/setup', { method: 'POST', body: { ...body, token: data.token.trim() } });
         history.replaceState(null, '', '#/admin/domains');
         snack('Your organisation is ready. Next: publish the DNS records below.', { timeout: 9000 });
         done();
@@ -219,16 +277,19 @@ export function renderSetup(root, done) {
       }
     };
   };
+  const collect = (form) => {
+    form.querySelectorAll('input[name]:not([type=color])').forEach((i) => { if (i.name in data) data[i.name] = i.value; });
+  };
   paint();
 }
 
 // ---------------------------------------------------------------- forced password change
 export function renderForceChange(root, me, done) {
-  document.title = 'Choose a password – Skien Mails';
+  document.title = `Choose a password – ${appName()}`;
   setHTML(root, html`<div class="auth"><div>
     <div class="auth-card narrow">
       <div>
-        <img class="logo" src="/icons/favicon.svg" alt="">
+        <img class="logo" src="${iconURL()}" alt="">
         <h1 style="font-size:30px">Choose a new password</h1>
         <p class="lead">Hi ${me.user.name.split(' ')[0]} — welcome to ${me.org.name}. Replace the temporary password you were given with one only you know.</p>
       </div>
@@ -245,7 +306,7 @@ export function renderForceChange(root, me, done) {
         </div>
       </form>
     </div>
-    <div class="auth-foot"><span>${me.user.email} · © 2026 Skien Software Labs</span>${themeToggle()}</div>
+    <div class="auth-foot"><span>${me.user.email} · ${COPYRIGHT}</span>${themeToggle()}</div>
   </div></div>`);
   wireFoot(root);
   passwordToggle(root);

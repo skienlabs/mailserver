@@ -72,7 +72,7 @@ func TestExportAndReimport(t *testing.T) {
 		}
 		return false
 	}
-	if !has(exportTop+"/Inbox/") || !has(exportTop+"/Sent/") || !has(exportTop+"/Clients/Acme_ Ltd/") || has(exportTop+"/Spam/") || !names[exportTop+"/README.txt"] {
+	if !has(app.exportTop()+"/Inbox/") || !has(app.exportTop()+"/Sent/") || !has(app.exportTop()+"/Clients/Acme_ Ltd/") || has(app.exportTop()+"/Spam/") || !names[app.exportTop()+"/README.txt"] {
 		t.Fatalf("zip contents: %v", names)
 	}
 	for n := range names {
@@ -91,7 +91,7 @@ func TestExportAndReimport(t *testing.T) {
 	for _, f := range zr2.File {
 		if strings.HasSuffix(f.Name, ".eml") {
 			n++
-			if !strings.HasPrefix(f.Name, exportTop+"/Spam/") {
+			if !strings.HasPrefix(f.Name, app.exportTop()+"/Spam/") {
 				t.Fatalf("unexpected %s", f.Name)
 			}
 		}
@@ -172,7 +172,7 @@ func TestExportIncludesMailAppDrafts(t *testing.T) {
 		rc, _ := f.Open()
 		b, _ := io.ReadAll(rc)
 		rc.Close()
-		if strings.HasPrefix(f.Name, exportTop+"/Drafts (mail apps)/") && strings.HasSuffix(f.Name, ".eml") {
+		if strings.HasPrefix(f.Name, app.exportTop()+"/Drafts (mail apps)/") && strings.HasSuffix(f.Name, ".eml") {
 			draft = string(b)
 		}
 		if strings.HasSuffix(f.Name, "messages.csv") {

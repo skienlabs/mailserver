@@ -163,7 +163,7 @@ func (t *TLSManager) selfSigned() (*tls.Certificate, error) {
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: host, Organization: []string{ProductName}},
+		Subject:      pkix.Name{CommonName: host, Organization: []string{t.app.headerName()}},
 		DNSNames:     []string{host},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(5, 0, 0),

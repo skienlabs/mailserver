@@ -463,11 +463,11 @@ func (p *pusher) flush(userID int64) {
 		if tid > 0 {
 			full.URL = fmt.Sprintf("/#/inbox/t/%d", tid)
 		}
-		private.Title, private.Body = "New message", "Open "+ProductName+" to read it."
+		private.Title, private.Body = "New message", "Open "+p.a.AppName()+" to read it."
 	} else {
 		full.Title = fmt.Sprintf("%d new messages", pend.count)
 		full.Body = truncateRunes(firstNonEmpty(strings.TrimSpace(pend.from), "New message")+": "+firstNonEmpty(strings.TrimSpace(pend.subject), "(no subject)"), 160)
-		private.Title, private.Body = full.Title, "Open "+ProductName+" to read them."
+		private.Title, private.Body = full.Title, "Open "+p.a.AppName()+" to read them."
 	}
 	var wg sync.WaitGroup
 	for _, sub := range p.subs(userID, 0) {
@@ -648,7 +648,7 @@ func (a *App) handlePushTest(w http.ResponseWriter, r *http.Request, u *User) {
 	}
 	var unread int
 	a.DB.QueryRow(`SELECT COUNT(*) FROM messages WHERE user_id=? AND folder='inbox' AND seen=0`, u.ID).Scan(&unread)
-	msg := pushMessage{Type: "test", Title: "Notifications are on", Body: "New mail will show up here even when " + ProductName + " is closed.", URL: "/#/settings/general", Unread: unread}
+	msg := pushMessage{Type: "test", Title: "Notifications are on", Body: "New mail will show up here even when " + a.AppName() + " is closed.", URL: "/#/settings/general", Unread: unread}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	status, err := p.deliver(ctx, subs[0], msg)

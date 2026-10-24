@@ -1,7 +1,7 @@
-// Skien Mails — application shell, routing, live updates and keyboard shortcuts.
+// Application shell, routing, live updates and keyboard shortcuts.
 import { SPRITE } from './icons.js';
 import { $, html, raw, icon, el, setHTML, api, bus, snack, dialog, menu, avatar, bytes, greeting, toastError, debounce } from './lib.js';
-import { S, FOLDERS, folderPath, isCustom, navigate, parseRoute, setTheme, themePref, setCounts, refreshCounts, loadDirectory, loadFolders, applyTheme, pref } from './state.js';
+import { S, FOLDERS, folderPath, isCustom, navigate, parseRoute, setTheme, themePref, setCounts, refreshCounts, loadDirectory, loadFolders, applyTheme, pref, appName, applyBrand, brandLabel, iconURL } from './state.js';
 import { newFolderDialog, folderMenu } from './folders.js';
 import * as auth from './auth.js';
 import * as mail from './mail.js';
@@ -24,7 +24,8 @@ async function boot() {
   shellReady = false;
   try {
     const st = await api('/setup');
-    if (st.needs_setup) return auth.renderSetup(root, boot);
+    applyBrand(st.brand);
+    if (st.needs_setup) return auth.renderSetup(root, boot, st);
   } catch (e) {
     return renderOffline(e);
   }
@@ -34,6 +35,7 @@ async function boot() {
     if (e.status === 401) return auth.renderLogin(root, boot);
     return renderOffline(e);
   }
+  applyBrand(S.me.brand);
   if (S.me.user.must_change_password) return auth.renderForceChange(root, S.me, boot);
   setCounts(S.me.counts);
   await Promise.all([loadDirectory(), loadFolders()]); // small; loaded first so photos and folders show on the first paint
@@ -67,7 +69,7 @@ function renderShell() {
   <div class="app ${collapsed ? 'collapsed' : ''}" id="app">
     <header class="topbar">
       <button class="icon-btn" id="menu-btn" data-tip="Main menu" aria-label="Main menu">${icon('menu')}</button>
-      <a class="brand" href="#/inbox" aria-label="Skien Mails home"><img src="/icons/favicon.svg" alt=""><span><b>Skien</b> Mails</span></a>
+      <a class="brand" id="brand" href="#/inbox" aria-label="${appName()} home">${brandMark()}</a>
       <form class="search" id="search" role="search" autocomplete="off">
         <button class="icon-btn" type="submit" aria-label="Search" data-tip="Search">${icon('search')}</button>
         <input name="q" id="search-input" placeholder="Search mail" aria-label="Search mail" spellcheck="false">
@@ -212,6 +214,20 @@ function renderFoot() {
 }
 
 bus.on('counts', () => { if (shellReady) { renderNav(); updateBadge(); } });
+bus.on('brand', () => {
+  const b = shellReady && $('#brand');
+  if (!b) return;
+  setHTML(b, brandMark());
+  b.setAttribute('aria-label', `${appName()} home`);
+  updateTitle();
+});
+
+// brandMark is the logo and name in the top bar.
+function brandMark() {
+  const { strong, rest } = brandLabel();
+  const n = appName().length;
+  return html`<img src="${iconURL()}" alt="" width="40" height="40"><span class="${n > 16 ? 'xs' : n > 11 ? 's' : ''}" title="${appName()}"><b>${strong}</b>${rest}</span>`;
+}
 bus.on('folders', () => { if (shellReady) { renderNav(); updateTitle(); } });
 
 function updateTitle() {
@@ -222,7 +238,7 @@ function updateTitle() {
   else if (r.name === 'settings') label = 'Settings';
   else if (r.name === 'admin') label = 'Admin console';
   else if (r.name === 'people') label = 'People';
-  document.title = `${label}${r.folder === 'inbox' && n ? ` (${n})` : ''} – ${S.me?.user.email || ''} – Skien Mails`;
+  document.title = `${label}${r.folder === 'inbox' && n ? ` (${n})` : ''} – ${S.me?.user.email || ''} – ${appName()}`;
 }
 
 function updateBadge() {
@@ -243,7 +259,7 @@ function accountMenu(anchor) {
     'sep',
     { icon: 'contacts', label: 'People directory', onClick: () => navigate('#/people') },
     ...(u.role === 'admin' ? [{ icon: 'admin_panel_settings', label: 'Admin console', onClick: () => navigate('#/admin') }] : []),
-    ...(S.installPrompt ? [{ icon: 'install_desktop', label: 'Install Skien Mails app', onClick: installApp }] : []),
+    ...(S.installPrompt ? [{ icon: 'install_desktop', label: `Install ${appName()} app`, onClick: installApp }] : []),
     { icon: 'keyboard', label: 'Keyboard shortcuts', onClick: showShortcuts },
     'sep',
     { icon: 'logout', label: 'Sign out', onClick: signOut },
@@ -268,7 +284,7 @@ async function installApp() {
   S.installPrompt = null;
   p.prompt();
   const { outcome } = await p.userChoice;
-  if (outcome === 'accepted') snack('Skien Mails is now installed as an app');
+  if (outcome === 'accepted') snack(`${appName()} is now installed as an app`);
 }
 addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); S.installPrompt = e; });
 addEventListener('appinstalled', () => { S.installPrompt = null; });
@@ -434,7 +450,7 @@ async function notifyNewMail(ev) {
   if (pushActiveHere()) return; // the push notification for this mail arrives anyway (sw.js)
   if (document.visibilityState === 'visible' && document.hasFocus()) return;
   const title = ev.from || 'New message';
-  const opts = { body: ev.subject || '(no subject)', icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', tag: 'sm-new-mail', renotify: true, data: { url: '/#/inbox' } };
+  const opts = { body: ev.subject || '(no subject)', icon: iconURL('icon-192.png'), badge: iconURL('badge-96.png'), tag: 'sm-new-mail', renotify: true, data: { url: '/#/inbox' } };
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
     if (reg) reg.showNotification(title, opts);
@@ -485,7 +501,7 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
     if (url.startsWith('/#/')) location.hash = url.slice(1);
   });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (hadController) snack('A new version of Skien Mails is ready', { action: 'Reload', onAction: () => location.reload(), timeout: 0 });
+    if (hadController) snack(`A new version of ${appName()} is ready`, { action: 'Reload', onAction: () => location.reload(), timeout: 0 });
   });
 }
 

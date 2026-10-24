@@ -484,6 +484,7 @@ type Compose struct {
 	Extra      map[string]string // extra headers (Auto-Submitted, ...)
 	Files      []OutgoingPart
 	MessageID  string
+	Agent      string // User-Agent: the app name
 }
 
 func toMailAddrs(list []Addr) []*mail.Address {
@@ -521,7 +522,9 @@ func BuildMessage(c Compose, hostname string) ([]byte, string, error) {
 		h.SetMsgIDList("References", c.References)
 	}
 	h.Set("MIME-Version", "1.0")
-	h.Set("User-Agent", ProductName)
+	if c.Agent != "" {
+		h.Set("User-Agent", c.Agent)
+	}
 	for k, v := range c.Extra {
 		h.Set(k, v)
 	}

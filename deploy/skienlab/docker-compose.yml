@@ -1,0 +1,44 @@
+# Skien Software Labs' own server (mail.skienlab.com): pre-built image from Artifact Registry,
+# on the shared skiensuite-net network behind Nginx Proxy Manager. Deployed by the
+# "Build & Deploy" workflow; the VM keeps its own copy in ~/docker/apps/mailserver.
+# Anyone else: use ../../docker-compose.yml.
+networks:
+  skiensuite-net:
+    name: skiensuite-net
+    external: true
+
+services:
+  skienmail:
+    image: us-central1-docker.pkg.dev/inspired-verve-293514/test-images/mailserver:latest
+    container_name: skienmail
+    restart: unless-stopped
+    networks:
+      - skiensuite-net
+    ports:
+      - "25:25"     # inbound mail from the internet (MX)
+      - "587:587"   # submission (STARTTLS) for mail apps, printers, scripts
+      - "465:465"   # submission (implicit TLS)
+      - "993:993"   # IMAP (implicit TLS) for Outlook, Apple Mail, Thunderbird, phones
+      - "143:143"   # IMAP (STARTTLS)
+    environment:
+      TZ: Asia/Kolkata
+      SM_HOSTNAME: mail.skienlab.com
+      # Recommended: real TLS certificate for SMTP and IMAP, reusing Nginx Proxy Manager's Let's
+      # Encrypt certificate for mail.skienlab.com (npm-N = the certificate's ID in NPM). Without
+      # this a self-signed certificate is used: other mail servers accept it, but mail apps
+      # (Outlook, Apple Mail, phones) warn or refuse to connect over IMAP.
+      # SM_TLS_CERT: /certs/live/npm-N/fullchain.pem
+      # SM_TLS_KEY: /certs/live/npm-N/privkey.pem
+    # user: "0:0"   # needed together with the certificate mount (Let's Encrypt keys are root-only)
+    volumes:
+      - skienmail-data:/data
+      # - /path/to/nginx-proxy-manager/letsencrypt:/certs:ro
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  skienmail-data:

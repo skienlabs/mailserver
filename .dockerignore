@@ -5,3 +5,5 @@ data
 tools
 docker-compose*.yml
 .github
+deploy
+docs

@@ -1,4 +1,4 @@
-// Command skienmail runs the Skien Mails server: SMTP (inbound, submission),
+// Command skienmail runs the mail server: SMTP (inbound, submission),
 // outbound delivery queue and the webmail/admin web app, in one process.
 //
 // Maintenance commands (run inside the container with `docker exec skienmail skienmail ...`):
@@ -40,7 +40,7 @@ func main() {
 		log.Error("startup failed", "err", err)
 		os.Exit(1)
 	}
-	log.Info(core.ProductName+" is running", "version", core.Version, "hostname", app.Hostname())
+	log.Info("mail server is running", "app", app.AppName(), "version", core.Version, "hostname", app.Hostname())
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -52,7 +52,7 @@ func main() {
 func runCommand(cfg *core.Config, args []string) int {
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Println(core.ProductName, core.Version)
+		fmt.Println("skienmail", core.Version)
 		return 0
 	case "reset-password":
 		if len(args) != 2 {

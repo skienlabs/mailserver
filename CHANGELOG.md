@@ -2,6 +2,13 @@
 
 Skien Mails uses simple version numbers: **1.0.1, 1.0.2 …** for fixes and small additions, **1.1.0** for bigger features. The running version is shown at the bottom of the side menu, in *Admin console → Overview*, and by `docker exec skienmail skienmail version`.
 
+## 1.2.0 — 24 October 2026
+
+- **Your own name and colour.** Anyone can run the server for their organisation, and each server shows its own name and main colour — set it up for *Softop* and everyone sees **Softop Mails** in Softop's colour on the sign-in page, in the browser tab, on the app icon on phones and computers, and in notifications. Both are chosen in a new setup step (the page previews the colour as you pick it) and can be changed any time in *Admin console → Server settings → Name and colour*. Text and buttons stay readable whatever colour is chosen. Servers set up before this release keep the name "Skien Mails". Only the copyright line is fixed.
+- **New, minimalist look**: flat surfaces with hairline edges, no gradients, glass or glows, and the main colour on the buttons, the selected folder and the highlights. The welcome page follows the same style. Dark mode stays true black.
+- App icons, the favicon and the notification icon are drawn in the main colour (a new icon appears on installed apps the next time the device refreshes it).
+- **Ready-made Docker image for anyone**: `ghcr.io/skienlabs/mailserver` for `linux/amd64` and `linux/arm64`, published by a new workflow when a version tag is pushed. The repository's `docker-compose.yml` is now a general-purpose file; Skien Software Labs' own server file moved to `deploy/skienlab/docker-compose.yml`. The README covers installing from the image, HTTPS with Nginx Proxy Manager or Caddy, and certificates from certbot.
+
 ## 1.1.1 — 21 October 2026
 
 - **New welcome page**: the sign-in screen now opens beside a short animated scene of the inbox at work (a message arrives, is starred, another is filed by a filter). On phones the form stays on the first screen; people who turn off animations see the finished picture.

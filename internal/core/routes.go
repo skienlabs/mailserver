@@ -4,11 +4,12 @@ import "net/http"
 
 func (a *App) routes(m *http.ServeMux, version string) {
 	m.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"version": Version, "build": version, "product": ProductName})
+		writeJSON(w, http.StatusOK, map[string]any{"version": Version, "build": version, "product": a.AppName()})
 	})
 	// setup & auth
 	m.HandleFunc("GET /api/setup", a.handleSetupStatus)
 	m.HandleFunc("POST /api/setup", a.handleSetup)
+	m.HandleFunc("GET /api/brand/preview", a.handleBrandPreview)
 	m.HandleFunc("POST /api/auth/login", a.handleLogin)
 	m.HandleFunc("POST /api/auth/logout", a.authed(a.handleLogout))
 	m.HandleFunc("GET /api/me", a.authed(a.handleMe))

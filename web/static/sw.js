@@ -1,4 +1,4 @@
-// Skien Mails service worker: makes the app installable and loads instantly.
+// Service worker: makes the app installable and loads instantly.
 // API calls always go to the network; the app shell is cached per release.
 const VERSION = '{{V}}';
 const CACHE = 'sm-shell-' + VERSION;
@@ -7,10 +7,7 @@ const SHELL = [
   '/css/app.css?v=' + VERSION,
   '/js/theme.js?v=' + VERSION,
   '/js/app.js?v=' + VERSION,
-  '/manifest.webmanifest',
   '/fonts/google-sans-latin-wght-normal.woff2',
-  '/icons/favicon.svg',
-  '/icons/icon-192.png',
 ];
 
 self.addEventListener('install', (e) => {
@@ -36,9 +33,17 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(fetch(req).catch(() => caches.match('/')));
     return;
   }
+  if (url.pathname === '/manifest.webmanifest') {
+    // Carries this server's name and icon colour, which an administrator can change at any time.
+    e.respondWith(fetch(req).then((res) => {
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put('/manifest.webmanifest', copy)); }
+      return res;
+    }).catch(() => caches.match('/manifest.webmanifest')));
+    return;
+  }
   e.respondWith(
     caches.match(req).then((hit) => hit || fetch(req).then((res) => {
-      if (res.ok && (url.search.includes('v=' + VERSION) || url.pathname.startsWith('/fonts/') || url.pathname.startsWith('/icons/'))) {
+      if (res.ok && (url.search.includes('v=' + VERSION) || url.pathname.startsWith('/fonts/') || (url.pathname.startsWith('/brand/') && url.search.startsWith('?c=')))) {
         const copy = res.clone();
         caches.open(CACHE).then((c) => c.put(req, copy));
       }
@@ -84,8 +89,8 @@ self.addEventListener('push', (e) => {
     const tag = m.type === 'test' ? 'sm-test' : 'sm-new-mail';
     await self.registration.showNotification(m.title || 'New mail', {
       body: m.body || '',
-      icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
+      icon: '/brand/icon-192.png',
+      badge: '/brand/badge-96.png',
       tag,
       renotify: !quiet,
       silent: quiet,

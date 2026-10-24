@@ -22,7 +22,8 @@ const (
 	SetDNSBL          = "dnsbl"
 	SetDefaultQuotaMB = "default_quota_mb"
 	SetTrashDays      = "trash_days"
-	SetAccent         = "accent"
+	SetAccent         = "accent"   // main colour of the web app, #rrggbb
+	SetAppName        = "app_name" // the name people see, e.g. "Softop Mails"
 )
 
 var settingDefaults = map[string]string{

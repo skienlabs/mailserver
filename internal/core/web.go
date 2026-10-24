@@ -38,10 +38,11 @@ var httpState struct {
 // ---------------------------------------------------------------- static assets
 
 type asset struct {
-	body  []byte
-	gz    []byte
-	etag  string
-	ctype string
+	body    []byte
+	gz      []byte
+	etag    string
+	ctype   string
+	dynamic bool // filled in with this server's name and colours on every request
 }
 
 var reImport = regexp.MustCompile(`((?:from|import)\s*\(?\s*['"]\./[\w./-]+\.js)(['"])`)
@@ -49,6 +50,7 @@ var reImport = regexp.MustCompile(`((?:from|import)\s*\(?\s*['"]\./[\w./-]+\.js)
 type assetStore struct {
 	files   map[string]*asset
 	version string
+	render  func(path string, tmpl []byte) (body []byte, etag string, gz []byte) // for dynamic assets
 }
 
 func loadAssets() (*assetStore, error) {
@@ -85,7 +87,6 @@ func loadAssets() (*assetStore, error) {
 		b := raw[n]
 		if n == "index.html" || n == "sw.js" {
 			b = bytes.ReplaceAll(b, []byte("{{V}}"), []byte(st.version))
-			b = bytes.ReplaceAll(b, []byte("{{PRODUCT}}"), []byte(ProductName))
 		}
 		if strings.HasPrefix(n, "js/") && strings.HasSuffix(n, ".js") {
 			// Version module imports so every release is fetched as one consistent set.
@@ -103,25 +104,27 @@ func loadAssets() (*assetStore, error) {
 		if ct == "" {
 			ct = "application/octet-stream"
 		}
-		a := &asset{body: b, ctype: ct}
+		a := &asset{body: b, ctype: ct, dynamic: n == "index.html" || n == "manifest.webmanifest"}
 		sum := sha256.Sum256(b)
 		a.etag = `"` + hex.EncodeToString(sum[:8]) + `"`
 		if strings.HasPrefix(ct, "text/") || strings.Contains(ct, "javascript") || strings.Contains(ct, "json") || strings.Contains(ct, "svg") {
-			var gz bytes.Buffer
-			zw, _ := gzip.NewWriterLevel(&gz, gzip.BestCompression)
-			zw.Write(b)
-			zw.Close()
-			if gz.Len() < len(b) {
-				a.gz = gz.Bytes()
-			}
+			a.gz = gzipped(b)
 		}
 		st.files["/"+n] = a
 	}
-	// Browsers and tools still probe /favicon.ico; browsers accept a PNG there.
-	if f := st.files["/icons/favicon-32.png"]; f != nil {
-		st.files["/favicon.ico"] = f
-	}
 	return st, nil
+}
+
+// gzipped compresses b, or returns nil when that doesn't make it smaller.
+func gzipped(b []byte) []byte {
+	var gz bytes.Buffer
+	zw, _ := gzip.NewWriterLevel(&gz, gzip.BestCompression)
+	zw.Write(b)
+	zw.Close()
+	if gz.Len() >= len(b) {
+		return nil
+	}
+	return gz.Bytes()
 }
 
 func (st *assetStore) serve(w http.ResponseWriter, r *http.Request) bool {
@@ -133,9 +136,13 @@ func (st *assetStore) serve(w http.ResponseWriter, r *http.Request) bool {
 	if a == nil {
 		return false
 	}
+	etag, body, gz := a.etag, a.body, a.gz
+	if a.dynamic && st.render != nil {
+		body, etag, gz = st.render(p, a.body)
+	}
 	h := w.Header()
 	h.Set("Content-Type", a.ctype)
-	h.Set("ETag", a.etag)
+	h.Set("ETag", etag)
 	h.Set("Vary", "Accept-Encoding")
 	switch {
 	case p == "/index.html" || p == "/sw.js" || p == "/manifest.webmanifest":
@@ -145,14 +152,13 @@ func (st *assetStore) serve(w http.ResponseWriter, r *http.Request) bool {
 	default:
 		h.Set("Cache-Control", "public, max-age=3600")
 	}
-	if match := r.Header.Get("If-None-Match"); match == a.etag {
+	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return true
 	}
-	body := a.body
-	if a.gz != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+	if gz != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 		h.Set("Content-Encoding", "gzip")
-		body = a.gz
+		body = gz
 	}
 	if r.Method == http.MethodHead {
 		return true
@@ -172,6 +178,7 @@ func (a *App) handler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	assets.render = a.renderPage
 	api := http.NewServeMux()
 	a.routes(api, assets.version)
 
@@ -214,7 +221,7 @@ func (a *App) handler() (http.Handler, error) {
 			return
 		}
 		h.Set("Content-Security-Policy", contentSecurityPolicy)
-		if !assets.serve(w, r) {
+		if !a.serveBrand(w, r) && !assets.serve(w, r) {
 			http.NotFound(w, r)
 		}
 	}), nil

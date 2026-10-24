@@ -1,34 +1,40 @@
-networks:
-  skiensuite-net:
-    name: skiensuite-net
-    external: true
-
+# Your own mail server in one container.
+#
+#   1. Set SM_HOSTNAME below to the web address of this server (e.g. mail.example.com).
+#   2. docker compose up -d
+#   3. docker logs skienmail 2>&1 | grep "setup code"
+#   4. Open https://mail.example.com (your reverse proxy in front of port 8080, README step 3;
+#      to try it first: ssh -L 8080:127.0.0.1:8080 your-server, then http://localhost:8080),
+#      enter the code, and choose your organisation's name, app name and main colour.
+#
+# The README explains DNS records, HTTPS and the TLS certificate for mail apps.
 services:
   skienmail:
-    image: us-central1-docker.pkg.dev/inspired-verve-293514/test-images/mailserver:latest
+    image: ghcr.io/skienlabs/mailserver:latest   # or pin a release, e.g. :1.2.0
     container_name: skienmail
     restart: unless-stopped
-    networks:
-      - skiensuite-net
     ports:
       - "25:25"     # inbound mail from the internet (MX)
       - "587:587"   # submission (STARTTLS) for mail apps, printers, scripts
       - "465:465"   # submission (implicit TLS)
       - "993:993"   # IMAP (implicit TLS) for Outlook, Apple Mail, Thunderbird, phones
       - "143:143"   # IMAP (STARTTLS)
+      # Web app (plain HTTP). Put a reverse proxy with HTTPS in front of it (Nginx Proxy
+      # Manager, Caddy, Traefik...). "127.0.0.1:" keeps it reachable from this machine only.
+      # If the proxy itself runs in Docker, put both containers on one network instead and
+      # forward to http://skienmail:8080 (README step 3).
+      - "127.0.0.1:8080:8080"
     environment:
-      TZ: Asia/Kolkata
-      SM_HOSTNAME: mail.skienlab.com
-      # Recommended: real TLS certificate for SMTP and IMAP, reusing Nginx Proxy Manager's Let's
-      # Encrypt certificate for mail.skienlab.com (npm-N = the certificate's ID in NPM). Without
-      # this a self-signed certificate is used: other mail servers accept it, but mail apps
-      # (Outlook, Apple Mail, phones) warn or refuse to connect over IMAP.
-      # SM_TLS_CERT: /certs/live/npm-N/fullchain.pem
-      # SM_TLS_KEY: /certs/live/npm-N/privkey.pem
-    # user: "0:0"   # needed together with the certificate mount (Let's Encrypt keys are root-only)
+      TZ: UTC                       # your time zone, e.g. Asia/Kolkata, Europe/Berlin
+      SM_HOSTNAME: mail.example.com # change this
+      # Real TLS certificate for SMTP and IMAP (README step 7). Without it a self-signed
+      # certificate is used: other mail servers accept it, but mail apps warn or refuse.
+      # SM_TLS_CERT: /certs/live/mail.example.com/fullchain.pem
+      # SM_TLS_KEY: /certs/live/mail.example.com/privkey.pem
+    # user: "0:0"   # only if the certificate files are readable by root only (Let's Encrypt)
     volumes:
       - skienmail-data:/data
-      # - /path/to/nginx-proxy-manager/letsencrypt:/certs:ro
+      # - /etc/letsencrypt:/certs:ro   # the whole folder: live/ links into archive/
     stop_grace_period: 30s
     logging:
       driver: json-file

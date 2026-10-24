@@ -309,7 +309,7 @@ func (s *session) receivedHeader(rcpt string) string {
 		for_ = "\r\n\tfor <" + rcpt + ">"
 	}
 	return fmt.Sprintf("Received: from %s ([%s])\r\n\tby %s (%s) with %s id %s%s;\r\n\t%s\r\n",
-		sanitizeHeaderValue(helo), s.ip, s.a.Hostname(), ProductName, proto, RandomHex(6), for_, time.Now().Format(time.RFC1123Z))
+		sanitizeHeaderValue(helo), s.ip, s.a.Hostname(), s.a.headerName(), proto, RandomHex(6), for_, time.Now().Format(time.RFC1123Z))
 }
 
 // sanitizeHeaderValue removes control characters (CR/LF header injection) and caps

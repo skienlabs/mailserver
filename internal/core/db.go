@@ -361,6 +361,11 @@ CREATE TABLE push_subs (
 CREATE INDEX push_subs_user ON push_subs(user_id);
 CREATE INDEX push_subs_session ON push_subs(session_id);
 `,
+	// 7 (1.2.0): the app name became a setting. Servers set up before that keep the name they
+	// have always shown; new servers choose theirs during setup.
+	`INSERT OR IGNORE INTO settings(key, value) SELECT 'app_name', 'Skien Mails'
+  WHERE EXISTS (SELECT 1 FROM settings WHERE key = 'setup_done' AND value = '1');
+`,
 }
 
 // OpenDB opens (and migrates) the SQLite database in dataDir.

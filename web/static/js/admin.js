@@ -1,7 +1,8 @@
 // Admin console: overview, users, groups, domains & DNS, delivery queue, activity log, server settings.
 import { $, $$, html, raw, icon, setHTML, api, snack, dialog, menu, avatar, bytes, ago, fullDate, field, selectField, toastError,
   confirmDialog, copyText, plural, upload, squareImage } from './lib.js';
-import { S, navigate, loadDirectory } from './state.js';
+import { S, navigate, loadDirectory, appName, applyBrand } from './state.js';
+import { colourPicker, wireColourPicker } from './brandui.js';
 
 const TABS = [
   ['overview', 'dashboard', 'Overview'],
@@ -62,7 +63,7 @@ async function overview(pane) {
     <div class="section">
       <h2>Server</h2>
       <div class="panel">
-        <div class="kv"><span class="k">Version</span><span class="v">${S.me.product || 'Skien Mails'} ${o.version || ''}</span></div>
+        <div class="kv"><span class="k">Version</span><span class="v">${appName()} ${o.version || ''}</span></div>
         <div class="kv"><span class="k">Mail hostname</span><span class="v">${o.hostname}</span></div>
         <div class="kv"><span class="k">TLS certificate</span><span class="v">${{ letsencrypt: "Let's Encrypt (automatic)", file: 'Certificate file (from your reverse proxy)', 'self-signed': 'Self-signed — fine for server-to-server mail; set SM_TLS_CERT for email apps' }[o.tls_mode] || o.tls_mode}</span></div>
         <div class="kv"><span class="k">Outgoing mail</span><span class="v">${o.relay ? 'Through an SMTP relay' : 'Delivered directly to recipients’ servers (port 25)'}</span><button class="btn sm outlined" id="test25">Test port 25</button></div>
@@ -97,7 +98,7 @@ Your ${S.me.org.name} email account is ready.
   Password:    ${password}
 
 You'll be asked to choose your own password the first time you sign in.
-Tip: install Skien Mails as an app from the browser for quick access.`;
+Tip: install ${appName()} as an app from the browser for quick access.`;
 }
 
 function showCredentials(user, password) {
@@ -294,7 +295,7 @@ async function groupDialog(g, usersList) {
         ${doms.length > 1 ? selectField({ label: 'Domain', name: 'domain_id', options: doms.map((d) => ({ value: d.id, label: '@' + d.name })), value: doms[0].id }) : html`<input type="hidden" name="domain_id" value="${doms[0].id}">`}
       </div>`}
       <div class="row2">
-        ${field({ label: 'Display name', name: 'name', value: g?.name || '', hint: 'Shown when someone sends as the group, e.g. “Skienlab Support”' })}
+        ${field({ label: 'Display name', name: 'name', value: g?.name || '', hint: 'Shown when someone sends as the group, e.g. “Acme Support”' })}
         ${field({ label: 'Description (optional)', name: 'description', value: g?.description || '' })}
       </div>
       <h3 style="font-weight:500;font-size:15px;margin:20px 0 0">Members</h3>
@@ -368,7 +369,7 @@ async function domains(pane) {
   };
   $('#add-domain').onclick = async () => {
     const ok = await dialog({
-      title: 'Add a domain', text: 'Receive and send mail for another domain you own, e.g. skienlab.com.',
+      title: 'Add a domain', text: 'Receive and send mail for another domain you own, e.g. example.com.',
       body: field({ label: 'Domain name', name: 'dname', attrs: 'autofocus autocapitalize="off" spellcheck="false"' }),
       actions: [{ label: 'Cancel', value: false }, { label: 'Add domain', value: true, kind: 'filled', submit: true }],
       onAction: async (v, d) => {
@@ -514,8 +515,16 @@ async function settings(pane) {
     <div class="section mt0"><h2>Organisation</h2>
       <div class="panel">
         ${field({ label: 'Organisation name', name: 'org_name', value: s.org_name })}
-        ${field({ label: 'Mail server hostname', name: 'hostname', value: s.hostname, attrs: s.hostname_locked ? 'readonly' : '', hint: s.hostname_locked ? 'Set by the SM_HOSTNAME environment variable.' : 'Must match your MX record, reverse DNS and TLS certificate, e.g. mail.skienlab.com' })}
+        ${field({ label: 'Mail server hostname', name: 'hostname', value: s.hostname, attrs: s.hostname_locked ? 'readonly' : '', hint: s.hostname_locked ? 'Set by the SM_HOSTNAME environment variable.' : 'Must match your MX record, reverse DNS and TLS certificate, e.g. mail.example.com' })}
         <div style="height:12px"></div>
+      </div></div>
+    <div class="section"><h2>Name and colour</h2>
+      <p class="lead">What everyone sees on the sign-in page, in the browser tab, on the app icon and in notifications.</p>
+      <div class="panel">
+        ${field({ label: 'App name', name: 'app_name', value: s.app_name, attrs: 'maxlength="40" autocomplete="off"', hint: 'For example “Softop Mails”' })}
+        <div class="fld-label">Main colour</div>
+        ${colourPicker(s.accent, s.presets || [])}
+        <div class="hint" style="margin:8px 0 12px">Installed apps pick up a new icon the next time the phone or computer refreshes them.</div>
       </div></div>
     <div class="section"><h2>Mailboxes & limits</h2>
       <div class="panel"><div class="row2">
@@ -542,18 +551,22 @@ async function settings(pane) {
       </div></div>
     <div class="form-actions" style="position:sticky;bottom:0;background:var(--surface);padding:12px 0"><button class="btn filled" type="submit">Save settings</button></div>
   </form>`);
+  // a colour picked but not saved is only a preview: leaving the page puts the saved one back
+  wireColourPicker($('#sfm'));
+  addEventListener('hashchange', () => applyBrand(S.me.brand), { once: true });
   $('#sfm').onsubmit = async (e) => {
     e.preventDefault();
     const f = e.target;
     const body = {};
-    ['org_name', 'hostname', 'default_quota_mb', 'max_message_mb', 'trash_days', 'spam_threshold', 'dnsbl', 'relay_host', 'relay_port', 'relay_user', 'relay_tls'].forEach((k) => { body[k] = f[k].value; });
+    ['org_name', 'app_name', 'accent', 'hostname', 'default_quota_mb', 'max_message_mb', 'trash_days', 'spam_threshold', 'dnsbl', 'relay_host', 'relay_port', 'relay_user', 'relay_tls'].forEach((k) => { body[k] = f[k].value; });
     if (f.relay_pass.value) body.relay_pass = f.relay_pass.value;
     if (s.hostname_locked) delete body.hostname;
     const btn = f.querySelector('[type=submit]');
     btn.classList.add('busy');
     try {
-      await api('/admin/settings', { method: 'PUT', body });
+      const saved = await api('/admin/settings', { method: 'PUT', body });
       S.me.org.name = body.org_name;
+      if (saved.brand) { S.me.brand = saved.brand; S.me.product = saved.brand.name; applyBrand(saved.brand); }
       if (body.hostname) S.me.org.hostname = body.hostname;
       snack('Settings saved');
     } catch (er) { toastError(er); } finally { btn.classList.remove('busy'); }

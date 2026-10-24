@@ -588,6 +588,7 @@ func (a *App) handleSend(w http.ResponseWriter, r *http.Request, u *User) {
 			a.DB.Exec(`UPDATE messages SET answered=1 WHERE id=? AND user_id=?`, in.ReplyToID, u.ID)
 		}
 	}
+	c.Agent = a.headerName()
 	raw, _, err := BuildMessage(c, a.Hostname())
 	if err != nil {
 		a.internalError(w, err)

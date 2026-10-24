@@ -267,6 +267,7 @@ func (a *App) Bounce(to string, original []byte, failures map[string]string) {
 		c.InReplyTo = om.MessageID
 		c.References = append(om.Refs, om.MessageID)
 	}
+	c.Agent = a.headerName()
 	raw, _, err := BuildMessage(c, a.Hostname())
 	if err != nil {
 		a.Log.Error("build bounce", "err", err)
@@ -354,6 +355,7 @@ func (a *App) maybeVacation(userID int64, sender string, m *Meta) {
 		c.InReplyTo = m.MessageID
 		c.References = append(append([]string{}, m.Refs...), m.MessageID)
 	}
+	c.Agent = a.headerName()
 	raw, _, err := BuildMessage(c, a.Hostname())
 	if err != nil {
 		return

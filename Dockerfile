@@ -1,15 +1,23 @@
 # syntax=docker/dockerfile:1
 # ---- build: a single static binary with the web app embedded
-FROM golang:1.26-alpine AS build
+# Built on the machine's own platform and cross-compiled (pure Go), so multi-platform images
+# (linux/amd64, linux/arm64) build quickly.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY third_party ./third_party
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/skienmail ./cmd/skienmail
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/skienmail ./cmd/skienmail
 
 # ---- runtime: ~25 MB image, runs as an unprivileged user
 FROM alpine:3.22
+LABEL org.opencontainers.image.title="Skien Mails" \
+      org.opencontainers.image.description="Self-hosted mail server, webmail and admin console in one container" \
+      org.opencontainers.image.source="https://github.com/skienlabs/mailserver" \
+      org.opencontainers.image.vendor="Skien Software Labs" \
+      org.opencontainers.image.licenses="MIT"
 RUN apk add --no-cache ca-certificates tzdata libcap \
  && adduser -D -H -u 10001 -s /sbin/nologin skienmail \
  && mkdir -p /data && chown skienmail:skienmail /data
